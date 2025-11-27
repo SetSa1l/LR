@@ -161,6 +161,7 @@ class BasicBlock(nn.Module):
             self.bn1 = nn.BatchNorm2d(in_planes)
         else:
             self.bn1 = nn.Identity()
+        self.relu1 = nn.ReLU()
         self.conv1 = nn.Conv2d(
             in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
@@ -168,6 +169,7 @@ class BasicBlock(nn.Module):
             self.bn2 = nn.BatchNorm2d(planes)
         else:
             self.bn2 = nn.Identity()
+        self.relu2 = nn.ReLU()
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
                                stride=1, padding=1, bias=False)
 
@@ -179,10 +181,10 @@ class BasicBlock(nn.Module):
 
     def forward(self, x):
         # Pre-activation: BN -> ReLU -> Conv
-        out = F.relu(self.bn1(x))
+        out = self.relu1(self.bn1(x))
         shortcut = self.shortcut(out) if hasattr(self, 'shortcut') else x
         out = self.conv1(out)
-        out = self.conv2(F.relu(self.bn2(out)))
+        out = self.conv2(self.relu2(self.bn2(out)))
         out += shortcut
         return out
 

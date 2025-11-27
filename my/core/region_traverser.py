@@ -1,15 +1,39 @@
 # -*- coding: utf-8 -*-
 """
 LinearRegionTraverser: 沿给定方向遍历线性区域
-真正的批量并行处理
+优化版本：使用 JIT 编译
 """
 
 import torch
 import numpy as np
-from typing import List
+from typing import List, Tuple
 from dataclasses import dataclass, field
 
-from .model_wrapper import ModelWrapper, ActivationPattern, normalize_direction, EPSILON, CROSSING_EPSILON
+from .model_wrapper import (
+    ModelWrapper, ActivationPattern, normalize_direction, 
+    compute_direction_norm, EPSILON
+)
+
+
+@torch.jit.script
+def _check_pattern_equality_jit(
+    patterns1: List[torch.Tensor], 
+    patterns2: List[torch. Tensor],
+    batch_size: int
+) -> torch.Tensor:
+    """JIT 编译的激活模式比较"""
+    device = patterns1[0].device
+    same_mask = torch. ones(batch_size, dtype=torch.bool, device=device)
+    
+    for i in range(len(patterns1)):
+        p1 = patterns1[i]
+        p2 = patterns2[i]
+        p1_flat = p1.view(batch_size, -1)
+        p2_flat = p2.view(batch_size, -1)
+        layer_same = (p1_flat == p2_flat).all(dim=1)
+        same_mask = same_mask & layer_same
+    
+    return same_mask
 
 
 @dataclass
@@ -29,7 +53,7 @@ class LinearRegionInfo:
 class TraversalResult:
     """单个样本的遍历结果"""
     start_point: torch.Tensor
-    direction: torch. Tensor
+    direction: torch.Tensor
     regions: List[LinearRegionInfo] = field(default_factory=list)
     total_distance: float = 0.0
     num_regions: int = 0
@@ -39,19 +63,19 @@ class TraversalResult:
 class BatchTraversalResult:
     """批量遍历结果"""
     batch_size: int
-    num_regions: torch.Tensor  # (batch,)
-    entry_ts: torch.Tensor  # (batch, max_regions)
-    exit_ts: torch.Tensor  # (batch, max_regions)
-    total_distances: torch.Tensor  # (batch,)
-    activation_patterns: List[torch.Tensor]  # 每层一个 (batch, max_regions, ...)
+    num_regions: torch.Tensor
+    entry_ts: torch.Tensor
+    exit_ts: torch.Tensor
+    total_distances: torch.Tensor
+    activation_patterns: List[torch.Tensor]
     
     def get_single_result(self, idx: int, start_point: torch.Tensor, direction: torch. Tensor) -> TraversalResult:
         """提取单个样本的结果"""
-        n_regions = self. num_regions[idx]. item()
+        n_regions = self.num_regions[idx]. item()
         regions = []
         
         for r in range(n_regions):
-            patterns = [p[idx, r] for p in self. activation_patterns]
+            patterns = [p[idx, r] for p in self.activation_patterns]
             regions.append(LinearRegionInfo(
                 region_id=r,
                 activation_pattern=ActivationPattern(patterns=[p. unsqueeze(0) for p in patterns]),
@@ -69,14 +93,15 @@ class BatchTraversalResult:
 
 
 class LinearRegionTraverser:
-    """
-    线性区域遍历器（真正的批量并行处理）
-    """
+    """线性区域遍历器 - 优化版本"""
     
     def __init__(self, model_wrapper: ModelWrapper):
         self.wrapper = model_wrapper
-        self.device = model_wrapper.device
+        self.device = model_wrapper. device
         self._model_dtype = model_wrapper._model_dtype
+        
+        self._epsilon = torch.tensor([EPSILON], dtype=torch.float64, device=self.device)
+        self._one = torch.ones((1,), dtype=torch.float64, device=self.device)
     
     def traverse(
         self,
@@ -87,7 +112,7 @@ class LinearRegionTraverser:
         normalize_dir: bool = True
     ) -> TraversalResult:
         """单样本遍历"""
-        if start.dim() == len(self.wrapper.input_shape):
+        if start.dim() == len(self. wrapper. input_shape):
             start = start.unsqueeze(0)
             direction = direction.unsqueeze(0)
         
@@ -101,239 +126,198 @@ class LinearRegionTraverser:
         
         return batch_result. get_single_result(0, start, direction)
     
-    def _check_pattern_same(
-        self, 
-        curr_patterns: List[torch.Tensor],
-        prev_patterns: List[torch. Tensor],
-        active_indices: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        检查当前激活模式是否与上一步相同
-        
-        Args:
-            curr_patterns: 当前激活模式列表，每个 shape (n_active, ...)
-            prev_patterns: 上一步激活模式列表，每个 shape (batch_size, ...)
-            active_indices: 活跃样本的全局索引 (n_active,)
-        
-        Returns:
-            same_mask: (n_active,) bool tensor，True 表示模式相同
-        """
-        n_active = active_indices.shape[0]
-        same_mask = torch. ones(n_active, dtype=torch. bool, device=self.device)
-        
-        for curr_pattern, prev_pattern in zip(curr_patterns, prev_patterns):
-            # curr_pattern: (n_active, ...)
-            # prev_pattern: (batch_size, ...)
-            # 只比较活跃样本
-            prev_selected = prev_pattern[active_indices]  # (n_active, ...)
-            
-            curr_flat = curr_pattern. reshape(n_active, -1)
-            prev_flat = prev_selected.reshape(n_active, -1)
-            
-            layer_same = (curr_flat == prev_flat).all(dim=1)
-            same_mask = same_mask & layer_same
-        
-        return same_mask
-    
     def traverse_batch(
         self,
-        starts: torch.Tensor,
+        starts: torch. Tensor,
         directions: torch.Tensor,
         max_distance: float = 10.0,
         max_regions: int = 100,
         normalize_dir: bool = True
     ) -> BatchTraversalResult:
-        """
-        批量并行遍历
-        """
-        if starts.dim() == len(self.wrapper.input_shape):
-            starts = starts.unsqueeze(0)
+        """批量并行遍历"""
+        if starts.dim() == len(self.wrapper. input_shape):
+            starts = starts. unsqueeze(0)
             directions = directions.unsqueeze(0)
-        
-        if normalize_dir:
-            directions = normalize_direction(directions)
         
         batch_size = starts.shape[0]
         starts = starts.to(device=self.device, dtype=self._model_dtype)
-        directions = directions.to(device=self.device, dtype=self._model_dtype)
+        directions = directions.to(device=self. device, dtype=self._model_dtype)
+        
+        # 计算方向范数和归一化方向
+        norm_of_directions = compute_direction_norm(directions)
+        directions_normalized = directions / (norm_of_directions + 1e-8)
+        
+        directions_for_traversal = directions_normalized
+        
+        # 计算终点
+        x0s = starts. clone()
+        x1s = starts + max_distance * directions_for_traversal
         
         # 预分配结果缓冲区
         entry_ts = torch. full((batch_size, max_regions), float('inf'),
-                              dtype=torch.float64, device=self. device)
-        exit_ts = torch. full((batch_size, max_regions), float('inf'),
+                              dtype=torch.float64, device=self.device)
+        exit_ts = torch.full((batch_size, max_regions), float('inf'),
                              dtype=torch.float64, device=self.device)
         
-        # 获取激活模式形状
-        init_state = self.wrapper. get_region_state(starts[:1], directions[:1])
-        pattern_shapes = [p.shape[1:] for p in init_state.activation_pattern. patterns]
+        x_current = x0s. clone()
+        
+        # 获取初始激活模式形状
+        init_state = self.wrapper. get_region_state(starts[:1], directions_for_traversal[:1])
+        pattern_shapes = [p.shape[1:] for p in init_state.activation_pattern.patterns]
         
         activation_patterns = [
             torch.zeros((batch_size, max_regions) + shape, dtype=torch.bool, device=self. device)
             for shape in pattern_shapes
         ]
         
+        # 获取终点的激活模式
+        act_pattern_x1 = self.wrapper.get_activation_pattern_only(x1s)
+        
         # 状态变量
-        current_x = starts. clone()
-        current_t = torch.zeros(batch_size, dtype=torch.float64, device=self. device)
         region_count = torch.zeros(batch_size, dtype=torch.long, device=self. device)
+        current_t = torch.zeros(batch_size, dtype=torch.float64, device=self. device)
         
-        # 活跃样本掩码
-        active_mask = torch.ones(batch_size, dtype=torch.bool, device=self. device)
-        
-        # 上一步的激活模式
-        prev_pattern_tensors = None
+        indices_to_batches = torch.arange(batch_size, device=self. device, dtype=torch.long)
         
         iteration = 0
-        while active_mask.any() and iteration < max_regions:
+        while len(indices_to_batches) > 0 and iteration < max_regions:
             iteration += 1
             
-            # 获取活跃样本索引
-            active_indices = torch.where(active_mask)[0]
-            n_active = active_indices.shape[0]
+            active_x = x_current[indices_to_batches]
+            active_dir = directions_for_traversal[indices_to_batches]
             
-            if n_active == 0:
+            state = self.wrapper. get_region_state(active_x, active_dir)
+            act_pattern_x = state.activation_pattern
+            lambdas = state. lambda_to_boundary
+            
+            # 使用 JIT 优化的模式比较
+            act_pattern_x1_active = act_pattern_x1. index_select(indices_to_batches)
+            
+            # 比较激活模式
+            same_mask = _check_pattern_equality_jit(
+                act_pattern_x. patterns,
+                act_pattern_x1_active.patterns,
+                len(indices_to_batches)
+            )
+            diff_indices_local = torch.where(~same_mask)[0]
+            
+            if len(diff_indices_local) == 0:
+                for i, global_idx in enumerate(indices_to_batches):
+                    idx = global_idx.item()
+                    r = region_count[idx].item()
+                    if r < max_regions:
+                        entry_ts[idx, r] = current_t[idx]
+                        exit_ts[idx, r] = max_distance
+                        for layer_idx, pattern in enumerate(state.activation_pattern. patterns):
+                            activation_patterns[layer_idx][idx, r] = pattern[i]
+                        region_count[idx] += 1
+                        current_t[idx] = max_distance
                 break
             
-            # 提取活跃样本
-            active_x = current_x[active_indices]
-            active_dir = directions[active_indices]
+            diff_indices_global = indices_to_batches[diff_indices_local]
+            lambdas = lambdas[diff_indices_local]
             
-            # 批量获取区域状态
-            state = self.wrapper.get_region_state(active_x, active_dir)
+            valid_lambda_mask = (lambdas > self._epsilon) & (lambdas <= self._one * max_distance)
             
-            # 检测是否需要重试（激活模式未变）
-            if prev_pattern_tensors is not None:
-                same_mask = self._check_pattern_same(
-                    state.activation_pattern. patterns,
-                    prev_pattern_tensors,
-                    active_indices
-                )
+            if not valid_lambda_mask. any():
+                for i, local_idx in enumerate(diff_indices_local):
+                    global_idx = indices_to_batches[local_idx]. item()
+                    r = region_count[global_idx]. item()
+                    if r < max_regions:
+                        entry_ts[global_idx, r] = current_t[global_idx]
+                        exit_ts[global_idx, r] = max_distance
+                        for layer_idx, pattern in enumerate(state.activation_pattern. patterns):
+                            activation_patterns[layer_idx][global_idx, r] = pattern[local_idx]
+                        region_count[global_idx] += 1
+                        current_t[global_idx] = max_distance
                 
-                if same_mask.any():
-                    # 对模式相同的样本增大步长
-                    retry_local_indices = torch.where(same_mask)[0]
-                    retry_global_indices = active_indices[retry_local_indices]
-                    current_x[retry_global_indices] += CROSSING_EPSILON * 10 * directions[retry_global_indices]
-                    current_t[retry_global_indices] += CROSSING_EPSILON * 10
-                    
-                    if same_mask.all():
-                        continue
-                    
-                    # 过滤掉需要重试的样本
-                    diff_mask = ~same_mask
-                    keep_local = torch.where(diff_mask)[0]
-                    active_indices = active_indices[keep_local]
-                    n_active = active_indices.shape[0]
-                    
-                    # 重新获取状态
-                    active_x = current_x[active_indices]
-                    active_dir = directions[active_indices]
-                    state = self.wrapper. get_region_state(active_x, active_dir)
-            
-            if n_active == 0:
+                keep_mask = torch.ones(len(indices_to_batches), dtype=torch. bool, device=self.device)
+                keep_mask[diff_indices_local] = False
+                indices_to_batches = indices_to_batches[keep_mask]
                 continue
             
-            active_t = current_t[active_indices]
-            active_region_count = region_count[active_indices]
-            lambda_vals = state.lambda_to_boundary
+            valid_local_indices = diff_indices_local[valid_lambda_mask]
+            valid_global_indices = indices_to_batches[valid_local_indices]
+            valid_lambdas = lambdas[valid_lambda_mask]
             
-            # 检查是否超出最大区域数
-            valid_mask = active_region_count < max_regions
-            if not valid_mask. all():
-                exceeded_local = torch.where(~valid_mask)[0]
-                exceeded_global = active_indices[exceeded_local]
-                active_mask[exceeded_global] = False
+            for i, (local_idx, global_idx) in enumerate(zip(valid_local_indices, valid_global_indices)):
+                idx = global_idx. item()
+                r = region_count[idx].item()
+                if r < max_regions:
+                    entry_ts[idx, r] = current_t[idx]
+                    for layer_idx, pattern in enumerate(state. activation_pattern.patterns):
+                        activation_patterns[layer_idx][idx, r] = pattern[local_idx]
+            
+            exit_t_vals = current_t[valid_global_indices] + valid_lambdas
+            
+            exceed_max = exit_t_vals >= max_distance
+            
+            if exceed_max.any():
+                exceed_local = torch.where(exceed_max)[0]
+                exceed_global = valid_global_indices[exceed_local]
                 
-                if not valid_mask.any():
-                    continue
+                for idx in exceed_global:
+                    idx = idx.item()
+                    r = region_count[idx].item()
+                    if r < max_regions:
+                        exit_ts[idx, r] = max_distance
+                        region_count[idx] += 1
+                        current_t[idx] = max_distance
                 
-                keep_local = torch. where(valid_mask)[0]
-                active_indices = active_indices[keep_local]
-                active_t = active_t[keep_local]
-                active_region_count = active_region_count[keep_local]
-                lambda_vals = lambda_vals[keep_local]
-                n_active = active_indices.shape[0]
+                remove_mask = torch. zeros(len(indices_to_batches), dtype=torch.bool, device=self. device)
+                for local_idx in valid_local_indices[exceed_local]:
+                    remove_mask[local_idx] = True
+                indices_to_batches = indices_to_batches[~remove_mask]
+            
+            normal_mask = ~exceed_max
+            if normal_mask.any():
+                normal_local = torch.where(normal_mask)[0]
+                normal_global = valid_global_indices[normal_local]
+                normal_lambdas = valid_lambdas[normal_local]
+                normal_exit_t = exit_t_vals[normal_local]
                 
-                # 更新 patterns
-                new_patterns = []
-                for p in state.activation_pattern.patterns:
-                    new_patterns.append(p[keep_local])
-                state.activation_pattern. patterns = new_patterns
-            
-            if n_active == 0:
-                continue
-            
-            write_indices = active_region_count
-            
-            # 记录 entry_t
-            entry_ts[active_indices, write_indices] = active_t
-            
-            # 记录激活模式
-            for layer_idx, pattern in enumerate(state.activation_pattern.patterns):
-                activation_patterns[layer_idx][active_indices, write_indices] = pattern
-            
-            # 计算 exit_t
-            no_boundary = torch.isinf(lambda_vals) | (lambda_vals <= 0)
-            has_boundary = ~no_boundary
-            
-            # 处理没有边界的样本
-            if no_boundary.any():
-                no_bd_local = torch.where(no_boundary)[0]
-                no_bd_global = active_indices[no_bd_local]
-                no_bd_write = write_indices[no_bd_local]
+                for i, idx in enumerate(normal_global):
+                    idx = idx.item()
+                    r = region_count[idx].item()
+                    if r < max_regions:
+                        exit_ts[idx, r] = normal_exit_t[i]
+                        region_count[idx] += 1
                 
-                exit_ts[no_bd_global, no_bd_write] = max_distance
-                region_count[no_bd_global] += 1
-                current_t[no_bd_global] = max_distance
-                active_mask[no_bd_global] = False
-            
-            # 处理有边界的样本
-            if has_boundary.any():
-                has_bd_local = torch.where(has_boundary)[0]
-                has_bd_global = active_indices[has_bd_local]
-                has_bd_write = write_indices[has_bd_local]
-                has_bd_t = active_t[has_bd_local]
-                has_bd_lambda = lambda_vals[has_bd_local]
+                step = normal_lambdas + self._epsilon
                 
-                exit_t_vals = has_bd_t + has_bd_lambda
+                for i, (local_idx, global_idx) in enumerate(zip(valid_local_indices[normal_local], normal_global)):
+                    x_current[global_idx] = x_current[global_idx] + step[i] * directions_for_traversal[global_idx]
+                    current_t[global_idx] = current_t[global_idx] + step[i]
                 
-                # 超过最大距离
-                exceed_max = exit_t_vals >= max_distance
-                if exceed_max.any():
-                    exceed_local = torch. where(exceed_max)[0]
-                    exceed_global = has_bd_global[exceed_local]
-                    exceed_write = has_bd_write[exceed_local]
-                    
-                    exit_ts[exceed_global, exceed_write] = max_distance
-                    region_count[exceed_global] += 1
-                    current_t[exceed_global] = max_distance
-                    active_mask[exceed_global] = False
+                for i, global_idx in enumerate(normal_global):
+                    dist_from_start = torch.norm(
+                        (x_current[global_idx] - x0s[global_idx]).view(-1)
+                    ). item()
+                    if dist_from_start > max_distance:
+                        mask = indices_to_batches != global_idx
+                        indices_to_batches = indices_to_batches[mask]
+            
+            invalid_local_indices = diff_indices_local[~valid_lambda_mask]
+            if len(invalid_local_indices) > 0:
+                invalid_global_indices = indices_to_batches[invalid_local_indices]
                 
-                # 正常跨越
-                normal = ~exceed_max
-                if normal.any():
-                    normal_local = torch. where(normal)[0]
-                    normal_global = has_bd_global[normal_local]
-                    normal_write = has_bd_write[normal_local]
-                    normal_exit_t = exit_t_vals[normal_local]
-                    normal_lambda = has_bd_lambda[normal_local]
-                    
-                    exit_ts[normal_global, normal_write] = normal_exit_t
-                    region_count[normal_global] += 1
-                    
-                    step = normal_lambda + CROSSING_EPSILON
-                    current_x[normal_global] += step. view(-1, *([1] * (current_x.dim() - 1))) * directions[normal_global]
-                    current_t[normal_global] += step
-            
-            # 更新上一步的激活模式
-            if prev_pattern_tensors is None:
-                prev_pattern_tensors = [
-                    torch.zeros((batch_size,) + shape, dtype=torch. bool, device=self.device)
-                    for shape in pattern_shapes
-                ]
-            
-            for layer_idx, pattern in enumerate(state.activation_pattern. patterns):
-                prev_pattern_tensors[layer_idx][active_indices] = pattern
+                for i, (local_idx, global_idx) in enumerate(zip(invalid_local_indices, invalid_global_indices)):
+                    idx = global_idx.item()
+                    r = region_count[idx].item()
+                    if r < max_regions:
+                        entry_ts[idx, r] = current_t[idx]
+                        exit_ts[idx, r] = max_distance
+                        for layer_idx, pattern in enumerate(state.activation_pattern.patterns):
+                            activation_patterns[layer_idx][idx, r] = pattern[local_idx]
+                        region_count[idx] += 1
+                        current_t[idx] = max_distance
+                
+                remove_mask = torch. zeros(len(indices_to_batches), dtype=torch. bool, device=self.device)
+                for local_idx in invalid_local_indices:
+                    remove_mask[local_idx] = True
+                indices_to_batches = indices_to_batches[~remove_mask]
+        
+        current_t = torch.clamp(current_t, max=max_distance)
         
         return BatchTraversalResult(
             batch_size=batch_size,
@@ -353,7 +337,7 @@ class LinearRegionTraverser:
         normalize_dir: bool = True
     ) -> List[TraversalResult]:
         """批量遍历，返回 TraversalResult 列表"""
-        batch_result = self.traverse_batch(
+        batch_result = self. traverse_batch(
             starts=starts,
             directions=directions,
             max_distance=max_distance,
