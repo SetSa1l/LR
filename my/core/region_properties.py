@@ -2,10 +2,10 @@
 """
 RegionPropertyAnalyzer: 计算线性区域的性质（高效批量版本）
 
-主要指标：
-1. 雅可比矩阵范数：衡量区域内的局部 Lipschitz 常数
-2. 相邻区域梯度范数差：衡量跨边界的梯度变化
-3. 相邻区域平均 Loss 差：衡量跨边界的 loss 变化
+主要优化：
+1. 使用 torch.func 加速雅可比计算
+2.  批量收集所有点后统一计算
+3. 减少重复前向/反向传播
 """
 
 import torch
@@ -68,7 +68,7 @@ class RegionPropertyAnalyzer:
     ):
         self.model = model
         self.device = device
-        self.model.to(device)
+        self.model. to(device)
         self.model.eval()
         self.num_samples = num_samples_per_region
         
@@ -80,6 +80,10 @@ class RegionPropertyAnalyzer:
         
         # 检查是否支持 torch.func
         self._use_torch_func = hasattr(torch, 'func')
+        
+        if not self._use_torch_func:
+            print("[Warning] torch.func not available.  Using legacy Jacobian computation (slower).")
+            print("[Warning] Please upgrade to PyTorch >= 2.0 for better performance.")
     
     def _get_output_dim(self, input_shape: Tuple) -> int:
         """获取模型输出维度"""
@@ -96,7 +100,7 @@ class RegionPropertyAnalyzer:
     
     def compute_jacobian_batch(self, x: torch.Tensor) -> torch.Tensor:
         """
-        批量计算雅可比矩阵 - 使用 torch.func 优化版本
+        批量计算雅可比矩阵 - 优先使用 torch.func
         
         Args:
             x: (batch, *input_shape)
@@ -123,24 +127,32 @@ class RegionPropertyAnalyzer:
     ) -> torch.Tensor:
         """使用 torch.func.jacrev + vmap 计算雅可比矩阵 - 比循环快 5-10x"""
         from torch.func import jacrev, vmap, functional_call
-        from copy import deepcopy
         
         # 获取模型参数的字典形式
         params = dict(self.model.named_parameters())
-        buffers = dict(self.model.named_buffers())
+        buffers = dict(self. model.named_buffers())
         
-        def func_model(params, buffers, single_x):
-            return functional_call(self.model, (params, buffers), (single_x.unsqueeze(0),)).squeeze(0)
+        def func_model(single_x):
+            """单样本模型函数"""
+            with torch.no_grad():
+                output = functional_call(
+                    self.model, (params, buffers), 
+                    (single_x.unsqueeze(0),),
+                    strict=False
+                )
+            return output.squeeze(0)
         
-        # 对输入计算雅可比
-        def compute_jac_single(single_x):
-            return jacrev(lambda inp: func_model(params, buffers, inp))(single_x)
-        
-        # vmap 批量化
-        jacobians = vmap(compute_jac_single)(x)
-        
-        # reshape: (batch, output_dim, *input_shape) -> (batch, output_dim, input_dim)
-        return jacobians.view(batch_size, output_dim, input_dim)
+        # vmap + jacrev 批量化雅可比计算
+        try:
+            jacobians = vmap(jacrev(func_model))(x)
+            # ✅ 修复：使用 reshape 并确保连续性
+            # reshape: (batch, output_dim, *input_shape) -> (batch, output_dim, input_dim)
+            result = jacobians.reshape(batch_size, output_dim, input_dim)
+            # ✅ 确保返回连续的tensor
+            return result.contiguous()
+        except Exception as e:
+            print(f"[Warning] torch.func failed: {e}. Falling back to legacy method.")
+            return self._compute_jacobian_legacy(x, batch_size, input_shape, input_dim, output_dim)
     
     def _compute_jacobian_legacy(
         self, x: torch.Tensor, batch_size: int,
@@ -148,12 +160,12 @@ class RegionPropertyAnalyzer:
     ) -> torch.Tensor:
         """传统方法计算雅可比矩阵 - 优化版本使用批量反向传播"""
         x_flat = x.view(batch_size, -1)
-        x_grad = x_flat.clone().requires_grad_(True)
+        x_grad = x_flat.clone(). requires_grad_(True)
         x_input = x_grad.view(batch_size, *input_shape)
         
         logits = self.model(x_input)
         
-        # 使用批量反向传播而不是循环
+        # 使用批量反向传播
         jacobian = torch.zeros(batch_size, output_dim, input_dim, 
                                device=self.device, dtype=self._model_dtype)
         
@@ -161,6 +173,9 @@ class RegionPropertyAnalyzer:
         eye = torch.eye(output_dim, device=self.device, dtype=self._model_dtype)
         
         for i in range(output_dim):
+            if x_grad.grad is not None:
+                x_grad. grad.zero_()
+            
             grad_outputs = eye[i].expand(batch_size, -1)
             grads = torch.autograd.grad(
                 outputs=logits,
@@ -174,15 +189,15 @@ class RegionPropertyAnalyzer:
         return jacobian
     
     def _power_iteration_spectral_norm(
-        self, jacobian: torch.Tensor, num_iters: int = 5
+        self, jacobian: torch.Tensor, num_iters: int = 3
     ) -> torch.Tensor:
         """
         使用 Power Iteration 快速近似计算谱范数
-        比完整 SVD 快 10-50 倍，精度足够用于分析
+        优化：减少迭代次数从5到3
         
         Args:
             jacobian: (batch, output_dim, input_dim)
-            num_iters: 迭代次数，通常 3-5 次足够
+            num_iters: 迭代次数
         
         Returns:
             spectral_norms: (batch,)
@@ -206,7 +221,7 @@ class RegionPropertyAnalyzer:
         
         # 谱范数 = ||J @ v||
         Jv = torch.bmm(jacobian, v)
-        spectral_norms = torch.norm(Jv.squeeze(-1), dim=1)
+        spectral_norms = torch.norm(Jv. squeeze(-1), dim=1)
         
         return spectral_norms
     
@@ -214,7 +229,7 @@ class RegionPropertyAnalyzer:
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        批量计算雅可比矩阵的范数 - 优化版本
+        批量计算雅可比矩阵的范数
         
         Args:
             x: (batch, *input_shape)
@@ -226,11 +241,12 @@ class RegionPropertyAnalyzer:
         jacobian = self.compute_jacobian_batch(x)
         batch_size = jacobian.shape[0]
         
+        # ✅ 修复：使用 flatten 而不是 view，更安全
         # Frobenius 范数 - 直接计算
-        frobenius_norms = torch.norm(jacobian.view(batch_size, -1), p=2, dim=1)
+        frobenius_norms = torch.norm(jacobian.flatten(1), p=2, dim=1)
         
-        # 谱范数 - 使用 Power Iteration 近似（比 SVD 快 10-50x）
-        spectral_norms = self._power_iteration_spectral_norm(jacobian, num_iters=5)
+        # 谱范数 - 使用 Power Iteration 近似（减少迭代次数）
+        spectral_norms = self._power_iteration_spectral_norm(jacobian, num_iters=3)
         
         return frobenius_norms, spectral_norms
     
@@ -267,7 +283,7 @@ class RegionPropertyAnalyzer:
         entry_ts: torch.Tensor,
         exit_ts: torch.Tensor,
         num_samples: int = 1
-    ) -> torch.Tensor:
+    ) -> torch. Tensor:
         """批量生成区域内的采样点 - 优化版本"""
         batch_size = start.shape[0]
         input_shape = start.shape[1:]
@@ -276,7 +292,7 @@ class RegionPropertyAnalyzer:
         direction = self._to_model_dtype(direction)
         
         entry_ts = entry_ts.to(dtype=self._model_dtype, device=self.device)
-        exit_ts = exit_ts.to(dtype=self._model_dtype, device=self.device)
+        exit_ts = exit_ts. to(dtype=self._model_dtype, device=self.device)
         
         # 预计算 view shape
         view_shape = (batch_size,) + (1,) * len(input_shape)
@@ -284,17 +300,16 @@ class RegionPropertyAnalyzer:
         if num_samples == 1:
             # 使用乘法代替除法
             mid_t = (entry_ts + exit_ts) * 0.5
-            return start + mid_t.view(view_shape) * direction
+            return start + mid_t. view(view_shape) * direction
         
-        # 批量生成多个采样点 - 避免循环
-        interval = exit_ts - entry_ts
+        # 批量生成多个采样点
         points = []
         for i in range(num_samples):
             ratio = (i + 0.5) / num_samples
-            t = entry_ts + ratio * interval
-            points.append(start + t.view(view_shape) * direction)
+            t = entry_ts + ratio * (exit_ts - entry_ts)
+            points.append(start + t. view(view_shape) * direction)
         
-        return torch.cat(points, dim=0)
+        return torch. cat(points, dim=0)
     
     def analyze_traversal(
         self,
@@ -303,7 +318,7 @@ class RegionPropertyAnalyzer:
         direction: torch.Tensor,
         label: Optional[Union[torch.Tensor, int]] = None
     ) -> TraversalProperties:
-        """分析完整的遍历结果"""
+        """分析完整的遍历结果（单样本）"""
         if traversal.num_regions == 0:
             return TraversalProperties(
                 num_regions=0,
@@ -328,8 +343,8 @@ class RegionPropertyAnalyzer:
                                dtype=self._model_dtype, device=self.device)
         
         # 扩展 start 和 direction 到 batch
-        starts = start.unsqueeze(0).expand(num_regions, *input_shape).clone()
-        directions = direction.unsqueeze(0).expand(num_regions, *input_shape).clone()
+        starts = start.unsqueeze(0).expand(num_regions, *input_shape). clone()
+        directions = direction.unsqueeze(0).expand(num_regions, *input_shape). clone()
         
         # 1. 计算每个区域中点的雅可比范数
         mid_points = self._generate_sample_points(starts, directions, entry_ts, exit_ts, num_samples=1)
@@ -341,7 +356,7 @@ class RegionPropertyAnalyzer:
             if isinstance(label, int):
                 labels = torch.full((num_regions,), label, dtype=torch.long, device=self.device)
             else:
-                labels = label.expand(num_regions).to(self.device)
+                labels = label.expand(num_regions). to(self.device)
             
             if self.num_samples == 1:
                 mean_losses = self.compute_loss_batch(mid_points, labels)
@@ -351,7 +366,7 @@ class RegionPropertyAnalyzer:
                 )
                 sample_labels = labels.repeat(self.num_samples)
                 all_losses = self.compute_loss_batch(sample_points, sample_labels)
-                mean_losses = all_losses.view(self.num_samples, num_regions).mean(dim=0)
+                mean_losses = all_losses.view(self.num_samples, num_regions). mean(dim=0)
         
         # 3. 计算每个区域的 logit 变化
         eps_ratio = 0.05
@@ -376,7 +391,7 @@ class RegionPropertyAnalyzer:
             after_ts = boundary_ts + eps
             
             n_boundaries = num_regions - 1
-            boundary_starts = start.unsqueeze(0).expand(n_boundaries, *input_shape).clone()
+            boundary_starts = start. unsqueeze(0).expand(n_boundaries, *input_shape). clone()
             boundary_dirs = direction.unsqueeze(0).expand(n_boundaries, *input_shape).clone()
             
             before_points = self._generate_sample_points(boundary_starts, boundary_dirs, before_ts, before_ts, num_samples=1)
@@ -388,7 +403,7 @@ class RegionPropertyAnalyzer:
             
             if label is not None:
                 if isinstance(label, int):
-                    boundary_labels = torch.full((n_boundaries,), label, dtype=torch.long, device=self.device)
+                    boundary_labels = torch.full((n_boundaries,), label, dtype=torch.long, device=self. device)
                 else:
                     boundary_labels = label.expand(n_boundaries).to(self.device)
                 
@@ -405,7 +420,7 @@ class RegionPropertyAnalyzer:
         for i in range(num_regions):
             region_props.append(RegionProperties(
                 region_id=i,
-                entry_t=entry_ts[i].item(),
+                entry_t=entry_ts[i]. item(),
                 exit_t=exit_ts[i].item(),
                 jacobian_frobenius_norm=fro_norms[i].item(),
                 jacobian_spectral_norm=spec_norms[i].item(),
@@ -418,7 +433,7 @@ class RegionPropertyAnalyzer:
             adj_diffs.append(AdjacentRegionDiff(
                 region_id_before=i,
                 region_id_after=i + 1,
-                boundary_t=exit_ts[i].item(),
+                boundary_t=exit_ts[i]. item(),
                 jacobian_norm_diff=jacobian_diffs[i].item() if len(jacobian_diffs) > 0 else 0.0,
                 loss_diff=loss_diffs[i].item() if len(loss_diffs) > 0 else 0.0,
                 logit_diff=logit_diffs[i].item() if len(logit_diffs) > 0 else 0.0
@@ -447,21 +462,216 @@ class RegionPropertyAnalyzer:
         batch_traversal: BatchTraversalResult,
         starts: torch.Tensor,
         directions: torch.Tensor,
-        labels: Optional[torch.Tensor] = None
+        labels: Optional[torch. Tensor] = None
     ) -> List[TraversalProperties]:
-        """批量分析遍历结果"""
-        results = []
+        """优化的批量分析 - 收集所有点后统一计算"""
+        batch_size = batch_traversal.batch_size
         
-        for i in range(batch_traversal.batch_size):
+        print(f"[Optimized Batch Analysis] Processing {batch_size} samples...")
+        
+        # ===== 第1步：收集所有需要计算的点 =====
+        all_mid_points = []
+        all_entry_points = []
+        all_exit_points = []
+        all_boundary_before_points = []
+        all_boundary_after_points = []
+        
+        sample_region_info = []  # [(sample_idx, num_regions), ...]
+        boundary_info = []  # [(sample_idx, n_boundaries), ...]
+        
+        for i in range(batch_size):
             traversal = batch_traversal.get_single_result(i, starts, directions)
-            label = labels[i].item() if labels is not None else None
+            if traversal. num_regions == 0:
+                sample_region_info.append((i, 0))
+                continue
             
-            props = self.analyze_traversal(
-                traversal,
-                starts[i:i+1],
-                directions[i:i+1],
-                label
-            )
-            results.append(props)
+            num_regions = traversal.num_regions
+            sample_region_info.append((i, num_regions))
+            
+            # 收集该样本的所有采样点
+            entry_ts = torch.tensor([r.entry_t for r in traversal. regions], 
+                                   dtype=self._model_dtype, device=self.device)
+            exit_ts = torch.tensor([r.exit_t for r in traversal.regions], 
+                                  dtype=self._model_dtype, device=self.device)
+            
+            start_expanded = starts[i:i+1].expand(num_regions, *starts. shape[1:]). clone()
+            dir_expanded = directions[i:i+1].expand(num_regions, *directions.shape[1:]).clone()
+            
+            # 中点
+            mid_pts = self._generate_sample_points(start_expanded, dir_expanded, entry_ts, exit_ts, 1)
+            all_mid_points.append(mid_pts)
+            
+            # Entry/Exit 点
+            region_lengths = exit_ts - entry_ts
+            entry_offset = entry_ts + 0.05 * region_lengths
+            exit_offset = exit_ts - 0.05 * region_lengths
+            
+            entry_pts = self._generate_sample_points(start_expanded, dir_expanded, entry_offset, entry_offset, 1)
+            exit_pts = self._generate_sample_points(start_expanded, dir_expanded, exit_offset, exit_offset, 1)
+            all_entry_points.append(entry_pts)
+            all_exit_points.append(exit_pts)
+            
+            # 边界点
+            if num_regions > 1:
+                n_boundaries = num_regions - 1
+                boundary_info.append((i, n_boundaries))
+                
+                boundary_ts = exit_ts[:-1]
+                eps = torch.clamp(region_lengths[:-1] * 0.1, min=1e-5)
+                
+                before_ts = boundary_ts - eps
+                after_ts = boundary_ts + eps
+                
+                boundary_start = starts[i:i+1].expand(n_boundaries, *starts. shape[1:]).clone()
+                boundary_dir = directions[i:i+1].expand(n_boundaries, *directions.shape[1:]).clone()
+                
+                before_pts = self._generate_sample_points(boundary_start, boundary_dir, before_ts, before_ts, 1)
+                after_pts = self._generate_sample_points(boundary_start, boundary_dir, after_ts, after_ts, 1)
+                
+                all_boundary_before_points.append(before_pts)
+                all_boundary_after_points.append(after_pts)
         
+        # 如果所有样本都没有区域
+        if len(all_mid_points) == 0:
+            return [TraversalProperties(0, 0.0) for _ in range(batch_size)]
+        
+        # ===== 第2步：批量计算所有雅可比 ===== ✅ 关键优化！
+        all_mid_points_tensor = torch.cat(all_mid_points, dim=0)
+        total_points = all_mid_points_tensor.shape[0]
+        
+        print(f"[Batch Jacobian] Computing for {total_points} mid points...")
+        fro_norms_all, spec_norms_all = self.compute_jacobian_norms_batch(all_mid_points_tensor)
+        
+        # 边界点雅可比
+        if len(all_boundary_before_points) > 0:
+            all_before_tensor = torch.cat(all_boundary_before_points, dim=0)
+            all_after_tensor = torch.cat(all_boundary_after_points, dim=0)
+            
+            print(f"[Batch Jacobian] Computing for {all_before_tensor.shape[0]} boundary points...")
+            fro_before_all, _ = self.compute_jacobian_norms_batch(all_before_tensor)
+            fro_after_all, _ = self.compute_jacobian_norms_batch(all_after_tensor)
+        
+        # ===== 第3步：批量计算 Loss =====
+        if labels is not None:
+            all_labels = []
+            for sample_idx, num_regions in sample_region_info:
+                if num_regions > 0:
+                    all_labels.extend([labels[sample_idx]. item()] * num_regions)
+            
+            if len(all_labels) > 0:
+                all_labels_tensor = torch.tensor(all_labels, dtype=torch.long, device=self.device)
+                mean_losses_all = self.compute_loss_batch(all_mid_points_tensor, all_labels_tensor)
+            
+            # 边界loss
+            if len(all_boundary_before_points) > 0:
+                boundary_labels = []
+                for sample_idx, n_boundaries in boundary_info:
+                    boundary_labels.extend([labels[sample_idx].item()] * n_boundaries)
+                
+                boundary_labels_tensor = torch.tensor(boundary_labels, dtype=torch.long, device=self.device)
+                loss_before_all = self.compute_loss_batch(all_before_tensor, boundary_labels_tensor)
+                loss_after_all = self.compute_loss_batch(all_after_tensor, boundary_labels_tensor)
+        
+        # ===== 第4步：批量计算 Logit 差异 =====
+        all_entry_tensor = torch.cat(all_entry_points, dim=0)
+        all_exit_tensor = torch.cat(all_exit_points, dim=0)
+        logit_variations_all = self.compute_logit_diff_batch(all_entry_tensor, all_exit_tensor)
+        
+        if len(all_boundary_before_points) > 0:
+            logit_diffs_all = self.compute_logit_diff_batch(all_before_tensor, all_after_tensor)
+        
+        # ===== 第5步：分配结果回各个样本 =====
+        results = []
+        current_idx = 0
+        current_boundary_idx = 0
+        
+        for sample_idx, num_regions in sample_region_info:
+            if num_regions == 0:
+                results.append(TraversalProperties(0, 0.0))
+                continue
+            
+            traversal = batch_traversal.get_single_result(sample_idx, starts, directions)
+            
+            # 提取该样本的结果
+            fro_norms = fro_norms_all[current_idx:current_idx + num_regions]
+            spec_norms = spec_norms_all[current_idx:current_idx + num_regions]
+            
+            if labels is not None:
+                mean_losses = mean_losses_all[current_idx:current_idx + num_regions]
+            else:
+                mean_losses = torch.zeros(num_regions, device=self.device)
+            
+            logit_variations = logit_variations_all[current_idx:current_idx + num_regions]
+            
+            # 边界数据
+            if num_regions > 1:
+                n_boundaries = num_regions - 1
+                jacobian_diffs = torch.abs(
+                    fro_after_all[current_boundary_idx:current_boundary_idx + n_boundaries] -
+                    fro_before_all[current_boundary_idx:current_boundary_idx + n_boundaries]
+                )
+                
+                if labels is not None:
+                    loss_diffs = (
+                        loss_after_all[current_boundary_idx:current_boundary_idx + n_boundaries] -
+                        loss_before_all[current_boundary_idx:current_boundary_idx + n_boundaries]
+                    )
+                else:
+                    loss_diffs = torch.zeros(n_boundaries, device=self.device)
+                
+                logit_diffs = logit_diffs_all[current_boundary_idx:current_boundary_idx + n_boundaries]
+                current_boundary_idx += n_boundaries
+            else:
+                jacobian_diffs = torch.tensor([], device=self.device)
+                loss_diffs = torch.tensor([], device=self. device)
+                logit_diffs = torch.tensor([], device=self.device)
+            
+            current_idx += num_regions
+            
+            # 构建该样本的结果
+            entry_ts = torch.tensor([r.entry_t for r in traversal.regions], dtype=self._model_dtype, device=self.device)
+            exit_ts = torch.tensor([r.exit_t for r in traversal.regions], dtype=self._model_dtype, device=self. device)
+            
+            region_props = []
+            for r in range(num_regions):
+                region_props.append(RegionProperties(
+                    region_id=r,
+                    entry_t=entry_ts[r].item(),
+                    exit_t=exit_ts[r].item(),
+                    jacobian_frobenius_norm=fro_norms[r].item(),
+                    jacobian_spectral_norm=spec_norms[r]. item(),
+                    mean_loss=mean_losses[r].item(),
+                    logit_variation=logit_variations[r]. item()
+                ))
+            
+            adj_diffs = []
+            for r in range(num_regions - 1):
+                adj_diffs.append(AdjacentRegionDiff(
+                    region_id_before=r,
+                    region_id_after=r + 1,
+                    boundary_t=exit_ts[r].item(),
+                    jacobian_norm_diff=jacobian_diffs[r]. item() if len(jacobian_diffs) > 0 else 0.0,
+                    loss_diff=loss_diffs[r].item() if len(loss_diffs) > 0 else 0.0,
+                    logit_diff=logit_diffs[r].item() if len(logit_diffs) > 0 else 0.0
+                ))
+            
+            # 汇总统计
+            fro_list = fro_norms.tolist()
+            jac_diff_list = jacobian_diffs. tolist() if len(jacobian_diffs) > 0 else []
+            loss_diff_list = loss_diffs.tolist() if len(loss_diffs) > 0 else []
+            
+            results.append(TraversalProperties(
+                num_regions=num_regions,
+                total_distance=traversal. total_distance,
+                region_properties=region_props,
+                adjacent_diffs=adj_diffs,
+                mean_jacobian_norm=sum(fro_list) / len(fro_list) if fro_list else 0.0,
+                max_jacobian_norm=max(fro_list) if fro_list else 0.0,
+                mean_jacobian_diff=sum(jac_diff_list) / len(jac_diff_list) if jac_diff_list else 0.0,
+                max_jacobian_diff=max(jac_diff_list) if jac_diff_list else 0.0,
+                mean_loss_diff=sum(d for d in loss_diff_list) / len(loss_diff_list) if loss_diff_list else 0.0,
+                total_loss_change=sum(loss_diff_list) if loss_diff_list else 0.0
+            ))
+        
+        print(f"[Batch Analysis] Completed for {batch_size} samples.")
         return results

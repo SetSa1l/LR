@@ -15,7 +15,7 @@ from .model_wrapper import (
 )
 
 
-@torch.jit.script
+#@torch.jit.script
 def _check_pattern_equality_jit(
     patterns1: List[torch.Tensor], 
     patterns2: List[torch.Tensor],

@@ -333,7 +333,7 @@ def main():
         model=model,
         input_shape=(3, 32, 32),  # CIFAR10 图像尺寸
         device=device,
-        batch_size=64,
+        batch_size=32,
         num_samples_per_region=3
     )
     
@@ -369,7 +369,7 @@ def main():
     full_testset_results = analyze_full_testset(
         analyzer, test_loader, test_dataset,
         max_distance=1.0,
-        max_regions=2000
+        max_regions=500
     )
     
     # ============ 清理 ============
