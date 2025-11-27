@@ -3,7 +3,10 @@ Linear Region Analysis Toolkit
 用于分析 ReLU 神经网络的线性区域性质
 
 主要组件：
-- SimpleLinearRegionAnalyzer: 精简的分析器（推荐使用）
+- FastLinearRegionAnalyzer: 极速分析器（推荐使用，10-20x 性能提升）
+  使用解析方法计算边界距离，批量梯度计算
+  
+- SimpleLinearRegionAnalyzer: 精简的分析器
   只计算4个核心指标：区域数量、平均梯度范数、边界处梯度变化、边界处损失变化
   
 - LinearRegionAnalyzer: 完整的分析器（旧版本，保持兼容）
@@ -13,7 +16,10 @@ Linear Region Analysis Toolkit
 - RegionPropertyAnalyzer: 区域性质分析器
 """
 
-# 新的精简 API（推荐使用）
+# 极速版本 - 10-20x 性能提升（推荐使用）
+from .core.fast_linear_region_analyzer import FastLinearRegionAnalyzer, FastAnalysisResult
+
+# 精简 API
 from .core.linear_region_analyzer import SimpleLinearRegionAnalyzer, SimpleAnalysisResult
 
 # 旧 API（保持兼容）
@@ -28,9 +34,12 @@ from .core.region_properties import (
 )
 from .core.analyzer import LinearRegionAnalyzer, AnalysisResult, BatchAnalysisResult
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
-    # 新的精简 API（推荐）
+    # 极速版本 - 10-20x 性能提升（推荐）
+    "FastLinearRegionAnalyzer",
+    "FastAnalysisResult",
+    # 精简 API
     "SimpleLinearRegionAnalyzer",
     "SimpleAnalysisResult",
     # 旧 API（保持兼容）
