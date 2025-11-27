@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-精简的线性区域分析器 - 只计算4个核心指标
+Simplified Linear Region Analyzer - Only computes 4 core metrics
 
-核心指标：
-1. num_regions: 沿着指定方向的线性区域数量
-2. mean_gradient_norm: 平均梯度范数值
-3. mean_gradient_norm_change: 平均梯度范数变化值（边界处）
-4. mean_loss_change: 平均损失变化值（边界处）
+Core metrics:
+1. num_regions: Number of linear regions along a direction
+2. mean_gradient_norm: Average gradient norm value
+3. mean_gradient_norm_change: Average gradient norm change at boundaries
+4. mean_loss_change: Average loss change at boundaries
 
-设计原则：
-- 最小化内存占用（不存储完整激活模式历史）
-- 只计算需要的指标（删除谱范数、logit变化等）
-- 及时释放中间tensor
+Design principles:
+- Minimize memory footprint (no full activation pattern history)
+- Compute only required metrics (no spectral norm, logit changes, etc.)
+- Release intermediate tensors promptly
 """
 
 import torch
@@ -23,42 +23,59 @@ from copy import deepcopy
 import numpy as np
 
 
-# 常量
+# Constants
 EPSILON = 1e-6
+BOUNDARY_EPS_MIN = 1e-5  # Minimum epsilon for boundary point calculation
+BOUNDARY_EPS_RATIO = 0.1  # Ratio of lambda to use as epsilon
+MAX_BINARY_SEARCH_ITERATIONS = 20  # Maximum iterations for binary search
+TEST_DISTANCES = [0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]  # Distances to test for boundary
 
 
 @dataclass
 class SimpleAnalysisResult:
-    """精简的分析结果 - 只包含4个核心指标"""
-    num_regions: int                    # 区域数量
-    mean_gradient_norm: float           # 平均梯度范数
-    mean_gradient_norm_change: float    # 平均梯度范数变化
-    mean_loss_change: float             # 平均损失变化
+    """Simplified analysis result - contains only 4 core metrics"""
+    num_regions: int                    # Number of regions
+    mean_gradient_norm: float           # Average gradient norm
+    mean_gradient_norm_change: float    # Average gradient norm change
+    mean_loss_change: float             # Average loss change
 
 
 def normalize_direction(direction: torch.Tensor) -> torch.Tensor:
-    """归一化方向向量"""
+    """Normalize direction vector to unit length"""
     flat = direction.view(direction.shape[0], -1)
     norm = torch.norm(flat, p=2, dim=1, keepdim=True)
     norm = norm.view((direction.shape[0],) + (1,) * (len(direction.shape) - 1))
     return direction / (norm + 1e-8)
 
 
+def _calculate_boundary_epsilon(lambda_val: float) -> float:
+    """
+    Calculate epsilon for boundary point computation.
+    
+    Args:
+        lambda_val: Distance to boundary
+        
+    Returns:
+        Epsilon value for computing before/after boundary points
+    """
+    return max(BOUNDARY_EPS_MIN, lambda_val * BOUNDARY_EPS_RATIO)
+
+
 class SimpleLinearRegionAnalyzer:
     """
-    精简的线性区域分析器 - 最小化内存占用和计算开销
+    Simplified Linear Region Analyzer - Minimizes memory footprint and computation.
     
-    只计算4个核心指标：
-    1. 区域数量
-    2. 平均梯度范数
-    3. 边界处平均梯度范数变化
-    4. 边界处平均损失变化
+    Computes only 4 core metrics:
+    1. Number of regions
+    2. Mean gradient norm
+    3. Mean gradient norm change at boundaries
+    4. Mean loss change at boundaries
     
-    用法:
+    Usage:
         analyzer = SimpleLinearRegionAnalyzer(model, input_shape=(784,), device='cuda')
         result = analyzer.analyze_direction(x, direction, label, max_distance=1.0)
-        print(f"区域数: {result.num_regions}")
-        print(f"平均梯度范数: {result.mean_gradient_norm}")
+        print(f"Regions: {result.num_regions}")
+        print(f"Mean gradient norm: {result.mean_gradient_norm}")
     """
     
     def __init__(
@@ -69,32 +86,32 @@ class SimpleLinearRegionAnalyzer:
     ):
         """
         Args:
-            model: PyTorch 模型（ReLU 激活）
-            input_shape: 输入形状（不含 batch 维度）
-            device: 计算设备
+            model: PyTorch model (with ReLU activations)
+            input_shape: Input shape (without batch dimension)
+            device: Computation device
         """
         self.device = device
         self.input_shape = input_shape
         
-        # 复制模型避免修改原模型
+        # Copy model to avoid modifying original
         self._model = deepcopy(model)
         self._model.eval()
         self._model.requires_grad_(False)
         self._model.to(device)
         
-        # 获取模型 dtype
+        # Get model dtype
         self._model_dtype = next(self._model.parameters()).dtype
         
-        # 查找 ReLU 层
+        # Find ReLU layers
         self._relu_modules = []
         self._find_relu_layers()
         
-        # 预创建常量避免重复创建
+        # Pre-create constants to avoid repeated creation
         self._epsilon = torch.tensor([EPSILON], dtype=torch.float64, device=device)
         self._inf = torch.tensor([np.inf], dtype=torch.float64, device=device)
         
     def _find_relu_layers(self):
-        """查找所有 ReLU 层"""
+        """Find all ReLU layers in the model"""
         relu_order = []
         
         def order_hook(module, inp, out):
@@ -105,7 +122,7 @@ class SimpleLinearRegionAnalyzer:
             if isinstance(module, nn.ReLU):
                 temp_hooks.append(module.register_forward_hook(order_hook))
         
-        # 运行一次前向传播确定 ReLU 顺序
+        # Run one forward pass to determine ReLU order
         dummy = torch.ones((1,) + self.input_shape, device=self.device, dtype=self._model_dtype)
         with torch.no_grad():
             self._model(dummy)
@@ -117,31 +134,31 @@ class SimpleLinearRegionAnalyzer:
         self._num_relus = len(self._relu_modules)
     
     def _ensure_batch_dim(self, x: torch.Tensor) -> torch.Tensor:
-        """确保输入有 batch 维度"""
+        """Ensure input has batch dimension"""
         if x.dim() == len(self.input_shape):
             return x.unsqueeze(0)
         return x
     
     def _to_device(self, x: torch.Tensor) -> torch.Tensor:
-        """转移到设备并设置正确的 dtype"""
+        """Transfer to device with correct dtype"""
         return x.to(device=self.device, dtype=self._model_dtype)
     
     def _compute_gradient_norm(self, x: torch.Tensor) -> float:
         """
-        计算梯度范数（Frobenius范数）
+        Compute gradient norm (Frobenius norm).
         
-        优化：直接累积平方和，不构造完整雅可比矩阵
+        Optimized: Accumulates sum of squares directly without constructing full Jacobian.
         """
         x_input = self._ensure_batch_dim(x)
         x_input = self._to_device(x_input)
         
-        # 需要梯度
+        # Requires gradient
         x_grad = x_input.detach().clone().requires_grad_(True)
         
         logits = self._model(x_grad)
         num_classes = logits.shape[1]
         
-        # 计算所有输出的梯度并累积平方和
+        # Compute gradients for all outputs and accumulate squared sum
         grad_norm_sq = 0.0
         for i in range(num_classes):
             if x_grad.grad is not None:
@@ -156,7 +173,7 @@ class SimpleLinearRegionAnalyzer:
     
     def _compute_gradient_norm_batch(self, points: torch.Tensor) -> torch.Tensor:
         """
-        批量计算梯度范数
+        Batch compute gradient norms.
         
         Args:
             points: (batch, *input_shape)
@@ -175,7 +192,7 @@ class SimpleLinearRegionAnalyzer:
         return norms
     
     def _compute_loss(self, x: torch.Tensor, label: int) -> float:
-        """计算单点的损失"""
+        """Compute loss for a single point"""
         x_input = self._ensure_batch_dim(x)
         x_input = self._to_device(x_input)
         
@@ -186,7 +203,7 @@ class SimpleLinearRegionAnalyzer:
         return loss.item()
     
     def _compute_loss_batch(self, points: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """批量计算损失"""
+        """Batch compute losses"""
         points = self._to_device(points)
         labels = labels.to(self.device)
         
@@ -198,13 +215,16 @@ class SimpleLinearRegionAnalyzer:
     
     def _get_activation_pattern(self, x: torch.Tensor) -> List[np.ndarray]:
         """
-        获取激活模式（简化版）
-        只存储布尔值，不存储完整tensor
+        Get activation pattern (simplified version).
+        Stores only boolean values, not full tensors.
+        
+        Note: Assumes single-input ReLU modules (input[0]).
         """
         patterns = []
         
         def hook(module, input, output):
-            # 只记录是否激活，转为 numpy 节省内存
+            # Only record whether activated, convert to numpy to save memory
+            # Assumes single-input module (input[0])
             patterns.append((input[0] > 0).cpu().numpy())
         
         hooks = []
@@ -223,7 +243,7 @@ class SimpleLinearRegionAnalyzer:
         return patterns
     
     def _pattern_same(self, p1: List[np.ndarray], p2: List[np.ndarray]) -> bool:
-        """比较两个激活模式是否相同"""
+        """Compare if two activation patterns are identical"""
         if len(p1) != len(p2):
             return False
         for a, b in zip(p1, p2):
@@ -237,27 +257,26 @@ class SimpleLinearRegionAnalyzer:
         direction: torch.Tensor
     ) -> float:
         """
-        计算到最近边界的距离
+        Compute distance to nearest boundary.
         
-        使用数值方法：通过检测激活模式变化来确定边界
+        Uses numerical method: detects activation pattern changes.
         """
         x = self._ensure_batch_dim(x)
         direction = self._ensure_batch_dim(direction)
         x = self._to_device(x)
         direction = self._to_device(direction)
         
-        # 获取当前激活模式
+        # Get current activation pattern
         current_pattern = self._get_activation_pattern(x)
         
-        # 二分搜索找到最近的边界
+        # Binary search to find nearest boundary
         low = 0.0
         high = 1.0
         
-        # 首先找到一个会改变激活模式的距离
-        test_distances = [0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+        # First find a distance that changes activation pattern
         boundary_found = False
         
-        for dist in test_distances:
+        for dist in TEST_DISTANCES:
             x_test = x + dist * direction
             test_pattern = self._get_activation_pattern(x_test)
             if not self._pattern_same(current_pattern, test_pattern):
@@ -268,8 +287,8 @@ class SimpleLinearRegionAnalyzer:
         if not boundary_found:
             return float('inf')
         
-        # 二分搜索精确边界
-        for _ in range(20):  # 20次迭代足够精确
+        # Binary search for precise boundary
+        for _ in range(MAX_BINARY_SEARCH_ITERATIONS):
             mid = (low + high) / 2
             x_mid = x + mid * direction
             mid_pattern = self._get_activation_pattern(x_mid)
@@ -293,21 +312,21 @@ class SimpleLinearRegionAnalyzer:
         max_regions: int = 100
     ) -> SimpleAnalysisResult:
         """
-        分析沿给定方向的线性区域
+        Analyze linear regions along a given direction.
         
-        核心流程：
-        1. 遍历线性区域（只记录边界位置）
-        2. 在区域中点计算梯度范数
-        3. 在边界前后计算梯度范数变化
-        4. 在边界前后计算损失变化（如果提供了label）
-        5. 返回统计结果
+        Core workflow:
+        1. Traverse linear regions (only record boundary positions)
+        2. Compute gradient norm at region midpoints
+        3. Compute gradient norm change before/after boundaries
+        4. Compute loss change before/after boundaries (if label provided)
+        5. Return statistics
         
         Args:
-            x: 起始点 (batch=1 or input_shape)
-            direction: 方向向量（应该已归一化）
-            label: 标签（用于计算损失）
-            max_distance: 最大遍历距离
-            max_regions: 最大区域数
+            x: Starting point (batch=1 or input_shape)
+            direction: Direction vector (should be normalized)
+            label: Label (for computing loss)
+            max_distance: Maximum traversal distance
+            max_regions: Maximum number of regions
             
         Returns:
             SimpleAnalysisResult
@@ -317,10 +336,10 @@ class SimpleLinearRegionAnalyzer:
         x = self._to_device(x)
         direction = self._to_device(direction)
         
-        # 归一化方向
+        # Normalize direction
         direction = normalize_direction(direction)
         
-        # 初始化统计
+        # Initialize statistics
         num_regions = 0
         gradient_norms = []
         gradient_changes = []
@@ -328,21 +347,21 @@ class SimpleLinearRegionAnalyzer:
         
         current_t = 0.0
         
-        # 获取初始激活模式
+        # Get initial activation pattern
         prev_pattern = self._get_activation_pattern(x)
         
         while current_t < max_distance and num_regions < max_regions:
-            # 计算当前位置
+            # Compute current position
             current_x = x + current_t * direction
             
-            # 计算到下一个边界的距离
+            # Compute distance to next boundary
             lambda_val = self._compute_lambda_to_boundary(current_x, direction)
             
             if lambda_val <= 0 or lambda_val == float('inf'):
-                # 最后一个区域或无法找到边界
+                # Last region or cannot find boundary
                 num_regions += 1
                 
-                # 计算该区域中点的梯度范数
+                # Compute gradient norm at region midpoint
                 remaining_dist = max_distance - current_t
                 mid_t = current_t + remaining_dist / 2
                 mid_x = x + mid_t * direction
@@ -350,25 +369,25 @@ class SimpleLinearRegionAnalyzer:
                 gradient_norms.append(grad_norm)
                 break
             
-            # 调整lambda确保不超过max_distance
+            # Adjust lambda to not exceed max_distance
             actual_lambda = min(lambda_val, max_distance - current_t)
             
-            # 记录区域
+            # Record region
             num_regions += 1
             
-            # 区域中点的梯度范数
+            # Gradient norm at region midpoint
             mid_t = current_t + actual_lambda / 2
             mid_x = x + mid_t * direction
             grad_norm = self._compute_gradient_norm(mid_x)
             gradient_norms.append(grad_norm)
             
-            # 如果实际lambda等于剩余距离，说明到达终点
+            # If actual_lambda equals remaining distance, we've reached the end
             if actual_lambda >= max_distance - current_t - EPSILON:
                 break
             
-            # 边界前后的梯度和损失
+            # Gradient and loss before/after boundary
             boundary_t = current_t + actual_lambda
-            eps = max(1e-5, actual_lambda * 0.1)
+            eps = _calculate_boundary_epsilon(actual_lambda)
             
             x_before = x + (boundary_t - eps) * direction
             x_after = x + (boundary_t + eps) * direction
@@ -382,14 +401,14 @@ class SimpleLinearRegionAnalyzer:
                 loss_after = self._compute_loss(x_after, label)
                 loss_changes.append(loss_after - loss_before)
             
-            # 移动到下一个区域
+            # Move to next region
             current_t = boundary_t + eps
             
-            # 检查激活模式是否改变
+            # Check if activation pattern changed
             new_x = x + current_t * direction
             new_pattern = self._get_activation_pattern(new_x)
             if self._pattern_same(prev_pattern, new_pattern):
-                # 激活模式没变，可能是数值问题，继续尝试
+                # Pattern didn't change, possibly numerical issue, continue trying
                 pass
             prev_pattern = new_pattern
         
@@ -409,20 +428,20 @@ class SimpleLinearRegionAnalyzer:
         max_regions: int = 100
     ) -> List[SimpleAnalysisResult]:
         """
-        批量分析 - 收集所有计算点后一次性批量计算
+        Batch analysis - Collects all points then computes in batch.
         
-        核心思路：
-        1. 串行遍历所有样本，收集需要计算梯度的点
-        2. 将所有点合并为一个大batch
-        3. 一次性计算所有点的梯度范数
-        4. 分配结果回各个样本
+        Core approach:
+        1. Serially traverse all samples, collect points for gradient computation
+        2. Merge all points into a large batch
+        3. Compute all gradient norms at once
+        4. Distribute results back to each sample
         
         Args:
-            x_batch: 输入批次 (batch, *input_shape)
-            directions: 方向批次 (batch, *input_shape)
-            labels: 标签批次 (batch,)
-            max_distance: 最大遍历距离
-            max_regions: 最大区域数
+            x_batch: Input batch (batch, *input_shape)
+            directions: Direction batch (batch, *input_shape)
+            labels: Label batch (batch,)
+            max_distance: Maximum traversal distance
+            max_regions: Maximum number of regions
             
         Returns:
             List[SimpleAnalysisResult]
@@ -432,7 +451,7 @@ class SimpleLinearRegionAnalyzer:
         directions = self._to_device(directions)
         directions = normalize_direction(directions)
         
-        # 第1步：遍历并收集所有计算点
+        # Step 1: Traverse and collect all points to compute
         all_mid_points = []
         all_boundary_before = []
         all_boundary_after = []
@@ -445,7 +464,7 @@ class SimpleLinearRegionAnalyzer:
             direction = directions[i:i+1]
             label = labels[i].item() if labels is not None else None
             
-            # 遍历该样本收集点
+            # Traverse this sample and collect points
             points_info = self._traverse_and_collect_points(
                 x, direction, label, max_distance, max_regions
             )
@@ -460,7 +479,7 @@ class SimpleLinearRegionAnalyzer:
             })
             region_counts.append(points_info['num_regions'])
         
-        # 第2步：批量计算所有梯度范数
+        # Step 2: Batch compute all gradient norms
         mid_grad_norms = []
         if len(all_mid_points) > 0:
             all_mid_tensor = torch.cat(all_mid_points, dim=0)
@@ -474,11 +493,11 @@ class SimpleLinearRegionAnalyzer:
             boundary_grad_before = self._compute_gradient_norm_batch(before_tensor)
             boundary_grad_after = self._compute_gradient_norm_batch(after_tensor)
         
-        # 第3步：批量计算损失（如果需要）
+        # Step 3: Batch compute losses (if needed)
         boundary_loss_before = []
         boundary_loss_after = []
         if labels is not None and len(all_boundary_before) > 0:
-            # 需要为每个边界点准备对应的label
+            # Prepare labels for each boundary point
             boundary_labels = []
             for i, mapping in enumerate(point_mapping):
                 boundary_labels.extend([labels[i].item()] * mapping['num_boundary'])
@@ -488,7 +507,7 @@ class SimpleLinearRegionAnalyzer:
                 boundary_loss_before = self._compute_loss_batch(before_tensor, boundary_labels_tensor)
                 boundary_loss_after = self._compute_loss_batch(after_tensor, boundary_labels_tensor)
         
-        # 第4步：分配结果回各个样本
+        # Step 4: Distribute results back to each sample
         results = []
         mid_idx = 0
         boundary_idx = 0
@@ -497,14 +516,14 @@ class SimpleLinearRegionAnalyzer:
             num_mid = mapping['num_mid']
             num_boundary = mapping['num_boundary']
             
-            # 提取该样本的梯度范数
+            # Extract gradient norms for this sample
             if num_mid > 0:
                 sample_grad_norms = mid_grad_norms[mid_idx:mid_idx + num_mid].tolist()
                 mean_grad_norm = sum(sample_grad_norms) / len(sample_grad_norms)
             else:
                 mean_grad_norm = 0.0
             
-            # 提取该样本的梯度变化
+            # Extract gradient changes for this sample
             if num_boundary > 0:
                 before = boundary_grad_before[boundary_idx:boundary_idx + num_boundary]
                 after = boundary_grad_after[boundary_idx:boundary_idx + num_boundary]
@@ -513,7 +532,7 @@ class SimpleLinearRegionAnalyzer:
             else:
                 mean_grad_change = 0.0
             
-            # 提取该样本的损失变化
+            # Extract loss changes for this sample
             mean_loss_change = 0.0
             if labels is not None and num_boundary > 0 and len(boundary_loss_before) > 0:
                 loss_before = boundary_loss_before[boundary_idx:boundary_idx + num_boundary]
@@ -542,14 +561,14 @@ class SimpleLinearRegionAnalyzer:
         max_regions: int
     ) -> dict:
         """
-        遍历线性区域并收集需要计算的点
+        Traverse linear regions and collect points for computation.
         
         Returns:
             dict with keys:
                 - num_regions: int
-                - mid_points: List[Tensor] - 每个区域的中点
-                - boundary_before: List[Tensor] - 边界前的点
-                - boundary_after: List[Tensor] - 边界后的点
+                - mid_points: List[Tensor] - midpoint of each region
+                - boundary_before: List[Tensor] - points before boundary
+                - boundary_after: List[Tensor] - points after boundary
         """
         mid_points = []
         boundary_before = []
@@ -584,7 +603,7 @@ class SimpleLinearRegionAnalyzer:
                 break
             
             boundary_t = current_t + actual_lambda
-            eps = max(1e-5, actual_lambda * 0.1)
+            eps = _calculate_boundary_epsilon(actual_lambda)
             
             x_before = x + (boundary_t - eps) * direction
             x_after = x + (boundary_t + eps) * direction
@@ -611,17 +630,17 @@ class SimpleLinearRegionAnalyzer:
         normalize: bool = True
     ) -> torch.Tensor:
         """
-        计算朝向决策边界的方向
+        Compute direction toward decision boundary.
         
-        方向定义：∇_x (logit[top2] - logit[top1])
-        沿此方向移动会使 top1 和 top2 的差距减小
+        Direction is defined as: ∇_x (logit[top2] - logit[top1])
+        Moving in this direction reduces the gap between top1 and top2.
         
         Args:
-            x: 输入数据点 (batch, *input_shape)
-            normalize: 是否归一化方向向量
+            x: Input data point (batch, *input_shape)
+            normalize: Whether to normalize direction vector
             
         Returns:
-            direction: 方向向量
+            direction: Direction vector
         """
         x = self._ensure_batch_dim(x)
         x = self._to_device(x)
@@ -651,13 +670,13 @@ class SimpleLinearRegionAnalyzer:
         max_regions: int = 100
     ) -> SimpleAnalysisResult:
         """
-        便捷方法：自动计算决策边界方向并分析
+        Convenience method: Automatically compute decision boundary direction and analyze.
         
         Args:
-            x: 输入点
-            label: 标签
-            max_distance: 最大距离
-            max_regions: 最大区域数
+            x: Input point
+            label: Label
+            max_distance: Maximum distance
+            max_regions: Maximum number of regions
             
         Returns:
             SimpleAnalysisResult
@@ -670,6 +689,5 @@ class SimpleLinearRegionAnalyzer:
         return self.analyze_direction(x, direction, label, max_distance, max_regions)
     
     def cleanup(self):
-        """清理资源"""
-        # 当前实现无需特别清理
+        """Clean up resources (no special cleanup needed in current implementation)"""
         pass

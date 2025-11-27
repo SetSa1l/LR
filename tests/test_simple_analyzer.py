@@ -2,7 +2,7 @@
 """
 Tests for SimpleLinearRegionAnalyzer
 
-验证精简版分析器的4个核心指标计算
+Validates the 4 core metrics of the simplified analyzer.
 """
 
 import torch
@@ -16,7 +16,7 @@ from my import SimpleLinearRegionAnalyzer, SimpleAnalysisResult
 
 
 def create_simple_mlp(input_dim=100, hidden_dims=None, output_dim=10):
-    """创建简单的 MLP 测试模型"""
+    """Create a simple MLP test model"""
     if hidden_dims is None:
         hidden_dims = [64, 32]
     layers = []
@@ -30,7 +30,7 @@ def create_simple_mlp(input_dim=100, hidden_dims=None, output_dim=10):
 
 
 def create_simple_cnn(num_classes=10):
-    """创建简单的 CNN 测试模型"""
+    """Create a simple CNN test model"""
     return nn.Sequential(
         nn.Conv2d(3, 16, 3, padding=1),
         nn.ReLU(),
@@ -43,12 +43,12 @@ def create_simple_cnn(num_classes=10):
 
 
 def get_device():
-    """获取可用设备"""
+    """Get available device"""
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def test_simple_analyzer_creation():
-    """测试简化分析器创建"""
+    """Test simplified analyzer creation"""
     print("=" * 50)
     print("Test: SimpleLinearRegionAnalyzer Creation")
     print("=" * 50)
@@ -73,7 +73,7 @@ def test_simple_analyzer_creation():
 
 
 def test_gradient_norm_computation():
-    """测试梯度范数计算"""
+    """Test gradient norm computation"""
     print("=" * 50)
     print("Test: Gradient Norm Computation")
     print("=" * 50)
@@ -102,7 +102,7 @@ def test_gradient_norm_computation():
 
 
 def test_activation_pattern():
-    """测试激活模式获取"""
+    """Test activation pattern retrieval"""
     print("=" * 50)
     print("Test: Activation Pattern")
     print("=" * 50)
@@ -135,7 +135,7 @@ def test_activation_pattern():
 
 
 def test_boundary_detection():
-    """测试边界检测"""
+    """Test boundary detection"""
     print("=" * 50)
     print("Test: Boundary Detection")
     print("=" * 50)
@@ -165,7 +165,7 @@ def test_boundary_detection():
 
 
 def test_single_sample_analysis():
-    """测试单样本分析"""
+    """Test single sample analysis"""
     print("=" * 50)
     print("Test: Single Sample Analysis")
     print("=" * 50)
@@ -200,7 +200,7 @@ def test_single_sample_analysis():
 
 
 def test_direction_analysis():
-    """测试指定方向分析"""
+    """Test analysis with specified direction"""
     print("=" * 50)
     print("Test: Direction Analysis")
     print("=" * 50)
@@ -235,7 +235,7 @@ def test_direction_analysis():
 
 
 def test_batch_analysis():
-    """测试批量分析"""
+    """Test batch analysis"""
     print("=" * 50)
     print("Test: Batch Analysis")
     print("=" * 50)
@@ -277,7 +277,7 @@ def test_batch_analysis():
 
 
 def test_cnn_model():
-    """测试 CNN 模型"""
+    """Test CNN model"""
     print("=" * 50)
     print("Test: CNN Model")
     print("=" * 50)
@@ -308,7 +308,7 @@ def test_cnn_model():
 
 
 def test_decision_boundary_direction():
-    """测试决策边界方向计算"""
+    """Test decision boundary direction computation"""
     print("=" * 50)
     print("Test: Decision Boundary Direction")
     print("=" * 50)
@@ -341,7 +341,7 @@ def test_decision_boundary_direction():
 
 
 def test_no_label_analysis():
-    """测试无标签分析"""
+    """Test analysis without label"""
     print("=" * 50)
     print("Test: Analysis without Label")
     print("=" * 50)
@@ -373,7 +373,7 @@ def test_no_label_analysis():
 
 
 def run_all_tests():
-    """运行所有测试"""
+    """Run all tests"""
     print("\n" + "=" * 70)
     print("Running Tests for SimpleLinearRegionAnalyzer")
     print("=" * 70 + "\n")
