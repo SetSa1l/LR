@@ -416,6 +416,82 @@ def test_lambda_correctness():
     return True
 
 
+def test_deep_network_traversal():
+    """Test deep network traversal capability (validates Gamba-style optimization)"""
+    print("=" * 50)
+    print("Test 11: Deep Network Traversal (Gamba-style optimization)")
+    print("=" * 50)
+    
+    # Create a deeper network (similar to ResNet depth)
+    def create_deep_mlp(input_dim=100, hidden_dims=None, output_dim=10):
+        if hidden_dims is None:
+            hidden_dims = [128, 64, 64, 32, 32, 16]
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            prev_dim = hidden_dim
+        layers.append(nn.Linear(prev_dim, output_dim))
+        return nn.Sequential(*layers)
+    
+    model = create_deep_mlp()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    wrapper = ModelWrapper(model=model, input_shape=(100,), batch_size=32, device=device)
+    traverser = LinearRegionTraverser(wrapper)
+    
+    print("Number of ReLU layers: %d" % wrapper.num_relus)
+    
+    torch.manual_seed(42)
+    x = torch.randn(1, 100, device=device)
+    direction = torch.randn(1, 100, device=device)
+    
+    max_distance = 5.0
+    result = traverser.traverse(
+        start=x, 
+        direction=direction, 
+        max_distance=max_distance, 
+        max_regions=200  # Increase region limit
+    )
+    
+    print("Number of regions traversed: %d" % result.num_regions)
+    print("Total distance: %.4f" % result.total_distance)
+    print("Max distance: %.4f" % max_distance)
+    print("Distance ratio: %.2f%%" % (result.total_distance / max_distance * 100))
+    
+    # 验证遍历距离接近 max_distance
+    # 由于深层网络边界密集，我们期望遍历距离至少达到 max_distance 的 80%
+    distance_ratio = result.total_distance / max_distance
+    print("Distance ratio threshold check: %.2f >= 0.80" % distance_ratio)
+    
+    # 放宽要求：对于深层网络，达到 max_distance 或区域数达到 max_regions
+    # 或者距离达到至少 80% 都算成功
+    success = (
+        result.total_distance >= max_distance - 0.01 or  # 达到了 max_distance
+        result.num_regions >= 200 or  # 达到了 max_regions 限制
+        distance_ratio >= 0.80  # 至少达到 80%
+    )
+    
+    # 验证区域连续性
+    gap_count = 0
+    for i in range(len(result.regions) - 1):
+        curr_exit = result.regions[i].exit_t
+        next_entry = result.regions[i + 1].entry_t
+        gap = next_entry - curr_exit
+        if gap > 0.01:  # 大于 1% 的 gap 算显著
+            gap_count += 1
+    
+    print("Significant gaps (> 0.01): %d" % gap_count)
+    
+    assert success, "Deep network traversal should cover most of max_distance"
+    assert gap_count == 0, "There should be no significant gaps"
+    
+    wrapper.cleanup()
+    print("PASSED\n")
+    return True
+
+
 def run_all_tests():
     print("\n" + "=" * 60)
     print("Running Phase 1 Tests (with Batch Processing)")
@@ -432,6 +508,7 @@ def run_all_tests():
         test_batch_efficiency,
         test_activation_pattern_changes,
         test_lambda_correctness,
+        test_deep_network_traversal,
     ]
     
     passed = 0

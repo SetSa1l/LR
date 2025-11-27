@@ -19,6 +19,7 @@ def normalize_direction(direction: torch. Tensor) -> torch.Tensor:
     """归一化方向向量"""
     flat = direction.view(direction.shape[0], -1)
     norm = torch.norm(flat, p=2, dim=1, keepdim=True)
+    norm = torch.norm(flat, p=2, dim=1, keepdim=True)
     norm = norm.view((direction.shape[0],) + (1,) * (len(direction.shape) - 1))
     return direction / (norm + 1e-8)
 
@@ -64,6 +65,7 @@ def _compute_lambdas_jit(
 @dataclass
 class ActivationPattern:
     """存储网络的激活模式"""
+    patterns: List[torch.Tensor] = field(default_factory=list)
     patterns: List[torch.Tensor] = field(default_factory=list)
     
     def equals(self, other: "ActivationPattern") -> torch.Tensor:
