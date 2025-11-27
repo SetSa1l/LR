@@ -1,3 +1,7 @@
+# 新的精简 API（推荐使用）
+from .linear_region_analyzer import SimpleLinearRegionAnalyzer, SimpleAnalysisResult
+
+# 保留旧 API 以保持向后兼容
 from .model_wrapper import ModelWrapper, normalize_direction, ActivationPattern, RegionState
 from .region_traverser import LinearRegionTraverser, TraversalResult, BatchTraversalResult, LinearRegionInfo
 from .direction_finder import DecisionBoundaryDirectionFinder, find_decision_boundary_direction
@@ -10,6 +14,10 @@ from .region_properties import (
 from .analyzer import LinearRegionAnalyzer, AnalysisResult, BatchAnalysisResult
 
 __all__ = [
+    # 新的精简 API（推荐）
+    "SimpleLinearRegionAnalyzer",
+    "SimpleAnalysisResult",
+    # 旧 API（保持兼容）
     "ModelWrapper", 
     "normalize_direction",
     "ActivationPattern",
