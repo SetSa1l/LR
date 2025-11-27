@@ -18,12 +18,12 @@ from .model_wrapper import (
 @torch.jit.script
 def _check_pattern_equality_jit(
     patterns1: List[torch.Tensor], 
-    patterns2: List[torch. Tensor],
+    patterns2: List[torch.Tensor],
     batch_size: int
 ) -> torch.Tensor:
     """JIT 编译的激活模式比较"""
     device = patterns1[0].device
-    same_mask = torch. ones(batch_size, dtype=torch.bool, device=device)
+    same_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
     
     for i in range(len(patterns1)):
         p1 = patterns1[i]
@@ -69,16 +69,16 @@ class BatchTraversalResult:
     total_distances: torch.Tensor
     activation_patterns: List[torch.Tensor]
     
-    def get_single_result(self, idx: int, start_point: torch.Tensor, direction: torch. Tensor) -> TraversalResult:
+    def get_single_result(self, idx: int, start_point: torch.Tensor, direction: torch.Tensor) -> TraversalResult:
         """提取单个样本的结果"""
-        n_regions = self.num_regions[idx]. item()
+        n_regions = self.num_regions[idx].item()
         regions = []
         
         for r in range(n_regions):
             patterns = [p[idx, r] for p in self.activation_patterns]
             regions.append(LinearRegionInfo(
                 region_id=r,
-                activation_pattern=ActivationPattern(patterns=[p. unsqueeze(0) for p in patterns]),
+                activation_pattern=ActivationPattern(patterns=[p.unsqueeze(0) for p in patterns]),
                 entry_t=self.entry_ts[idx, r].item(),
                 exit_t=self.exit_ts[idx, r].item()
             ))
@@ -87,7 +87,7 @@ class BatchTraversalResult:
             start_point=start_point[idx:idx+1] if start_point.shape[0] > idx else start_point,
             direction=direction[idx:idx+1] if direction.shape[0] > idx else direction,
             regions=regions,
-            total_distance=self.total_distances[idx]. item(),
+            total_distance=self.total_distances[idx].item(),
             num_regions=n_regions
         )
 
@@ -97,7 +97,7 @@ class LinearRegionTraverser:
     
     def __init__(self, model_wrapper: ModelWrapper):
         self.wrapper = model_wrapper
-        self.device = model_wrapper. device
+        self.device = model_wrapper.device
         self._model_dtype = model_wrapper._model_dtype
         
         self._epsilon = torch.tensor([EPSILON], dtype=torch.float64, device=self.device)
@@ -112,11 +112,11 @@ class LinearRegionTraverser:
         normalize_dir: bool = True
     ) -> TraversalResult:
         """单样本遍历"""
-        if start.dim() == len(self. wrapper. input_shape):
+        if start.dim() == len(self.wrapper.input_shape):
             start = start.unsqueeze(0)
             direction = direction.unsqueeze(0)
         
-        batch_result = self. traverse_batch(
+        batch_result = self.traverse_batch(
             starts=start,
             directions=direction,
             max_distance=max_distance,
@@ -124,24 +124,24 @@ class LinearRegionTraverser:
             normalize_dir=normalize_dir
         )
         
-        return batch_result. get_single_result(0, start, direction)
+        return batch_result.get_single_result(0, start, direction)
     
     def traverse_batch(
         self,
-        starts: torch. Tensor,
+        starts: torch.Tensor,
         directions: torch.Tensor,
         max_distance: float = 10.0,
         max_regions: int = 100,
         normalize_dir: bool = True
     ) -> BatchTraversalResult:
         """批量并行遍历"""
-        if starts.dim() == len(self.wrapper. input_shape):
-            starts = starts. unsqueeze(0)
+        if starts.dim() == len(self.wrapper.input_shape):
+            starts = starts.unsqueeze(0)
             directions = directions.unsqueeze(0)
         
         batch_size = starts.shape[0]
         starts = starts.to(device=self.device, dtype=self._model_dtype)
-        directions = directions.to(device=self. device, dtype=self._model_dtype)
+        directions = directions.to(device=self.device, dtype=self._model_dtype)
         
         # 计算方向范数和归一化方向
         norm_of_directions = compute_direction_norm(directions)
@@ -150,23 +150,23 @@ class LinearRegionTraverser:
         directions_for_traversal = directions_normalized
         
         # 计算终点
-        x0s = starts. clone()
+        x0s = starts.clone()
         x1s = starts + max_distance * directions_for_traversal
         
         # 预分配结果缓冲区
-        entry_ts = torch. full((batch_size, max_regions), float('inf'),
+        entry_ts = torch.full((batch_size, max_regions), float('inf'),
                               dtype=torch.float64, device=self.device)
         exit_ts = torch.full((batch_size, max_regions), float('inf'),
                              dtype=torch.float64, device=self.device)
         
-        x_current = x0s. clone()
+        x_current = x0s.clone()
         
         # 获取初始激活模式形状
-        init_state = self.wrapper. get_region_state(starts[:1], directions_for_traversal[:1])
+        init_state = self.wrapper.get_region_state(starts[:1], directions_for_traversal[:1])
         pattern_shapes = [p.shape[1:] for p in init_state.activation_pattern.patterns]
         
         activation_patterns = [
-            torch.zeros((batch_size, max_regions) + shape, dtype=torch.bool, device=self. device)
+            torch.zeros((batch_size, max_regions) + shape, dtype=torch.bool, device=self.device)
             for shape in pattern_shapes
         ]
         
@@ -174,10 +174,10 @@ class LinearRegionTraverser:
         act_pattern_x1 = self.wrapper.get_activation_pattern_only(x1s)
         
         # 状态变量
-        region_count = torch.zeros(batch_size, dtype=torch.long, device=self. device)
-        current_t = torch.zeros(batch_size, dtype=torch.float64, device=self. device)
+        region_count = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+        current_t = torch.zeros(batch_size, dtype=torch.float64, device=self.device)
         
-        indices_to_batches = torch.arange(batch_size, device=self. device, dtype=torch.long)
+        indices_to_batches = torch.arange(batch_size, device=self.device, dtype=torch.long)
         
         iteration = 0
         while len(indices_to_batches) > 0 and iteration < max_regions:
@@ -186,16 +186,16 @@ class LinearRegionTraverser:
             active_x = x_current[indices_to_batches]
             active_dir = directions_for_traversal[indices_to_batches]
             
-            state = self.wrapper. get_region_state(active_x, active_dir)
+            state = self.wrapper.get_region_state(active_x, active_dir)
             act_pattern_x = state.activation_pattern
-            lambdas = state. lambda_to_boundary
+            lambdas = state.lambda_to_boundary
             
             # 使用 JIT 优化的模式比较
-            act_pattern_x1_active = act_pattern_x1. index_select(indices_to_batches)
+            act_pattern_x1_active = act_pattern_x1.index_select(indices_to_batches)
             
             # 比较激活模式
             same_mask = _check_pattern_equality_jit(
-                act_pattern_x. patterns,
+                act_pattern_x.patterns,
                 act_pattern_x1_active.patterns,
                 len(indices_to_batches)
             )
@@ -208,7 +208,7 @@ class LinearRegionTraverser:
                     if r < max_regions:
                         entry_ts[idx, r] = current_t[idx]
                         exit_ts[idx, r] = max_distance
-                        for layer_idx, pattern in enumerate(state.activation_pattern. patterns):
+                        for layer_idx, pattern in enumerate(state.activation_pattern.patterns):
                             activation_patterns[layer_idx][idx, r] = pattern[i]
                         region_count[idx] += 1
                         current_t[idx] = max_distance
@@ -219,19 +219,19 @@ class LinearRegionTraverser:
             
             valid_lambda_mask = (lambdas > self._epsilon) & (lambdas <= self._one * max_distance)
             
-            if not valid_lambda_mask. any():
+            if not valid_lambda_mask.any():
                 for i, local_idx in enumerate(diff_indices_local):
-                    global_idx = indices_to_batches[local_idx]. item()
-                    r = region_count[global_idx]. item()
+                    global_idx = indices_to_batches[local_idx].item()
+                    r = region_count[global_idx].item()
                     if r < max_regions:
                         entry_ts[global_idx, r] = current_t[global_idx]
                         exit_ts[global_idx, r] = max_distance
-                        for layer_idx, pattern in enumerate(state.activation_pattern. patterns):
+                        for layer_idx, pattern in enumerate(state.activation_pattern.patterns):
                             activation_patterns[layer_idx][global_idx, r] = pattern[local_idx]
                         region_count[global_idx] += 1
                         current_t[global_idx] = max_distance
                 
-                keep_mask = torch.ones(len(indices_to_batches), dtype=torch. bool, device=self.device)
+                keep_mask = torch.ones(len(indices_to_batches), dtype=torch.bool, device=self.device)
                 keep_mask[diff_indices_local] = False
                 indices_to_batches = indices_to_batches[keep_mask]
                 continue
@@ -241,11 +241,11 @@ class LinearRegionTraverser:
             valid_lambdas = lambdas[valid_lambda_mask]
             
             for i, (local_idx, global_idx) in enumerate(zip(valid_local_indices, valid_global_indices)):
-                idx = global_idx. item()
+                idx = global_idx.item()
                 r = region_count[idx].item()
                 if r < max_regions:
                     entry_ts[idx, r] = current_t[idx]
-                    for layer_idx, pattern in enumerate(state. activation_pattern.patterns):
+                    for layer_idx, pattern in enumerate(state.activation_pattern.patterns):
                         activation_patterns[layer_idx][idx, r] = pattern[local_idx]
             
             exit_t_vals = current_t[valid_global_indices] + valid_lambdas
@@ -264,7 +264,7 @@ class LinearRegionTraverser:
                         region_count[idx] += 1
                         current_t[idx] = max_distance
                 
-                remove_mask = torch. zeros(len(indices_to_batches), dtype=torch.bool, device=self. device)
+                remove_mask = torch.zeros(len(indices_to_batches), dtype=torch.bool, device=self.device)
                 for local_idx in valid_local_indices[exceed_local]:
                     remove_mask[local_idx] = True
                 indices_to_batches = indices_to_batches[~remove_mask]
@@ -292,7 +292,7 @@ class LinearRegionTraverser:
                 for i, global_idx in enumerate(normal_global):
                     dist_from_start = torch.norm(
                         (x_current[global_idx] - x0s[global_idx]).view(-1)
-                    ). item()
+                    ).item()
                     if dist_from_start > max_distance:
                         mask = indices_to_batches != global_idx
                         indices_to_batches = indices_to_batches[mask]
@@ -312,7 +312,7 @@ class LinearRegionTraverser:
                         region_count[idx] += 1
                         current_t[idx] = max_distance
                 
-                remove_mask = torch. zeros(len(indices_to_batches), dtype=torch. bool, device=self.device)
+                remove_mask = torch.zeros(len(indices_to_batches), dtype=torch.bool, device=self.device)
                 for local_idx in invalid_local_indices:
                     remove_mask[local_idx] = True
                 indices_to_batches = indices_to_batches[~remove_mask]
@@ -331,13 +331,13 @@ class LinearRegionTraverser:
     def traverse_batch_simple(
         self,
         starts: torch.Tensor,
-        directions: torch. Tensor,
+        directions: torch.Tensor,
         max_distance: float = 10.0,
         max_regions: int = 100,
         normalize_dir: bool = True
     ) -> List[TraversalResult]:
         """批量遍历，返回 TraversalResult 列表"""
-        batch_result = self. traverse_batch(
+        batch_result = self.traverse_batch(
             starts=starts,
             directions=directions,
             max_distance=max_distance,

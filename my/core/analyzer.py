@@ -69,7 +69,7 @@ class BatchAnalysisResult:
         self.mean_num_regions = sum(r.num_regions for r in self.results) / len(self.results)
         self.mean_jacobian_norm = sum(r.mean_jacobian_norm for r in self.results) / len(self.results)
         self.mean_jacobian_diff = sum(r.mean_jacobian_diff for r in self.results) / len(self.results)
-        self.boundary_crossing_rate = sum(1 for r in self.results if r. crossed_decision_boundary) / len(self.results)
+        self.boundary_crossing_rate = sum(1 for r in self.results if r.crossed_decision_boundary) / len(self.results)
 
 
 class LinearRegionAnalyzer:
@@ -82,14 +82,14 @@ class LinearRegionAnalyzer:
         # 单样本分析
         result = analyzer.analyze(x, label)
         print("经过 %d 个区域" % result.num_regions)
-        print("平均雅可比范数: %.4f" % result. mean_jacobian_norm)
+        print("平均雅可比范数: %.4f" % result.mean_jacobian_norm)
         
         # 批量分析
-        batch_result = analyzer. analyze_batch(x_batch, labels)
+        batch_result = analyzer.analyze_batch(x_batch, labels)
         print("平均区域数: %.2f" % batch_result.mean_num_regions)
         
         # 清理
-        analyzer. cleanup()
+        analyzer.cleanup()
     """
     
     def __init__(
@@ -110,20 +110,31 @@ class LinearRegionAnalyzer:
         """
         self.model = model
         self.input_shape = input_shape
-        self. device = device
+        self.device = device
         
         # 初始化各组件
-        self. direction_finder = DecisionBoundaryDirectionFinder(model, device)
+        self.direction_finder = DecisionBoundaryDirectionFinder(model, device)
         self.wrapper = ModelWrapper(model, input_shape, batch_size, device)
         self.traverser = LinearRegionTraverser(self.wrapper)
         self.property_analyzer = RegionPropertyAnalyzer(model, device, num_samples_per_region)
         
         # 获取模型 dtype
-        self._model_dtype = next(model.parameters()). dtype
+        self._model_dtype = next(model.parameters()).dtype
+    
+    def _get_final_class(self, x: torch.Tensor, direction: torch.Tensor, 
+                        traversal, predicted_class: int) -> int:
+        """统一的终点类别检查 - 减少重复代码"""
+        if traversal.num_regions == 0:
+            return predicted_class
+        
+        last_region = traversal.regions[-1]
+        end_point = x + last_region.exit_t * direction
+        with torch.no_grad():
+            return self.model(end_point).argmax(dim=1).item()
     
     def analyze(
         self,
-        x: torch. Tensor,
+        x: torch.Tensor,
         label: Optional[Union[int, torch.Tensor]] = None,
         max_distance: float = 10.0,
         max_regions: int = 100,
@@ -155,7 +166,7 @@ class LinearRegionAnalyzer:
         margin_val = margin.item()
         
         # 2. 遍历线性区域
-        traversal = self.traverser. traverse(
+        traversal = self.traverser.traverse(
             start=x,
             direction=direction,
             max_distance=max_distance,
@@ -164,20 +175,12 @@ class LinearRegionAnalyzer:
         )
         
         # 3. 分析区域性质
-        properties = self.property_analyzer. analyze_traversal(
+        properties = self.property_analyzer.analyze_traversal(
             traversal, x, direction, label
         )
         
         # 4. 检查是否跨越决策边界
-        if traversal.num_regions > 0:
-            last_region = traversal.regions[-1]
-            end_point = x + last_region.exit_t * direction
-            with torch.no_grad():
-                end_logits = self.model(end_point)
-                final_class = end_logits.argmax(dim=1).item()
-        else:
-            final_class = predicted_class
-        
+        final_class = self._get_final_class(x, direction, traversal, predicted_class)
         crossed = (final_class != predicted_class)
         
         return AnalysisResult(
@@ -189,7 +192,7 @@ class LinearRegionAnalyzer:
             mean_jacobian_norm=properties.mean_jacobian_norm,
             max_jacobian_norm=properties.max_jacobian_norm,
             mean_jacobian_diff=properties.mean_jacobian_diff,
-            max_jacobian_diff=properties. max_jacobian_diff,
+            max_jacobian_diff=properties.max_jacobian_diff,
             mean_loss_diff=properties.mean_loss_diff,
             total_loss_change=properties.total_loss_change,
             crossed_decision_boundary=crossed,
@@ -219,7 +222,7 @@ class LinearRegionAnalyzer:
         Returns:
             BatchAnalysisResult
         """
-        batch_size = x. shape[0]
+        batch_size = x.shape[0]
         x = x.to(device=self.device, dtype=self._model_dtype)
         
         # 1. 批量计算方向
@@ -236,7 +239,7 @@ class LinearRegionAnalyzer:
         )
         
         # 3. 批量分析性质
-        all_properties = self.property_analyzer. analyze_batch(
+        all_properties = self.property_analyzer.analyze_batch(
             batch_traversal, x, directions, labels
         )
         
@@ -244,20 +247,14 @@ class LinearRegionAnalyzer:
         results = []
         for i in range(batch_size):
             # 获取单个样本的遍历结果
-            traversal = batch_traversal. get_single_result(i, x, directions)
+            traversal = batch_traversal.get_single_result(i, x, directions)
             properties = all_properties[i]
             
             # 检查是否跨越决策边界
             predicted_class = top1_indices[i].item()
-            if traversal.num_regions > 0:
-                last_region = traversal.regions[-1]
-                end_point = x[i:i+1] + last_region.exit_t * directions[i:i+1]
-                with torch.no_grad():
-                    end_logits = self.model(end_point)
-                    final_class = end_logits.argmax(dim=1).item()
-            else:
-                final_class = predicted_class
-            
+            final_class = self._get_final_class(
+                x[i:i+1], directions[i:i+1], traversal, predicted_class
+            )
             crossed = (final_class != predicted_class)
             
             result = AnalysisResult(
@@ -271,7 +268,7 @@ class LinearRegionAnalyzer:
                 mean_jacobian_diff=properties.mean_jacobian_diff,
                 max_jacobian_diff=properties.max_jacobian_diff,
                 mean_loss_diff=properties.mean_loss_diff,
-                total_loss_change=properties. total_loss_change,
+                total_loss_change=properties.total_loss_change,
                 crossed_decision_boundary=crossed,
                 final_class=final_class,
                 traversal=traversal if keep_details else None,
@@ -336,18 +333,12 @@ class LinearRegionAnalyzer:
         )
         
         # 分析
-        properties = self. property_analyzer.analyze_traversal(
+        properties = self.property_analyzer.analyze_traversal(
             traversal, x, direction, label
         )
         
         # 检查终点
-        if traversal. num_regions > 0:
-            last_region = traversal.regions[-1]
-            end_point = x + last_region.exit_t * direction
-            with torch.no_grad():
-                final_class = self.model(end_point).argmax(dim=1).item()
-        else:
-            final_class = predicted_class
+        final_class = self._get_final_class(x, direction, traversal, predicted_class)
         
         return AnalysisResult(
             predicted_class=predicted_class,
@@ -357,9 +348,9 @@ class LinearRegionAnalyzer:
             total_distance=properties.total_distance,
             mean_jacobian_norm=properties.mean_jacobian_norm,
             max_jacobian_norm=properties.max_jacobian_norm,
-            mean_jacobian_diff=properties. mean_jacobian_diff,
+            mean_jacobian_diff=properties.mean_jacobian_diff,
             max_jacobian_diff=properties.max_jacobian_diff,
-            mean_loss_diff=properties. mean_loss_diff,
+            mean_loss_diff=properties.mean_loss_diff,
             total_loss_change=properties.total_loss_change,
             crossed_decision_boundary=(final_class != predicted_class),
             final_class=final_class
@@ -399,7 +390,7 @@ class LinearRegionAnalyzer:
         
         # 统计
         random_num_regions = [r.num_regions for r in random_results]
-        random_jacobian_norms = [r. mean_jacobian_norm for r in random_results]
+        random_jacobian_norms = [r.mean_jacobian_norm for r in random_results]
         random_jacobian_diffs = [r.mean_jacobian_diff for r in random_results]
         random_crossing = [r.crossed_decision_boundary for r in random_results]
         
@@ -408,11 +399,11 @@ class LinearRegionAnalyzer:
                 'num_regions': boundary_result.num_regions,
                 'mean_jacobian_norm': boundary_result.mean_jacobian_norm,
                 'mean_jacobian_diff': boundary_result.mean_jacobian_diff,
-                'crossed_boundary': boundary_result. crossed_decision_boundary
+                'crossed_boundary': boundary_result.crossed_decision_boundary
             },
             'random_directions': {
                 'num_regions_mean': sum(random_num_regions) / len(random_num_regions),
-                'num_regions_std': torch.tensor(random_num_regions).float().std(). item(),
+                'num_regions_std': torch.tensor(random_num_regions).float().std().item(),
                 'mean_jacobian_norm': sum(random_jacobian_norms) / len(random_jacobian_norms),
                 'mean_jacobian_diff': sum(random_jacobian_diffs) / len(random_jacobian_diffs),
                 'crossing_rate': sum(random_crossing) / len(random_crossing)

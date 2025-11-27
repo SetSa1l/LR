@@ -10,10 +10,10 @@ Linear Region Analysis Toolkit
 - RegionPropertyAnalyzer: 区域性质分析器
 """
 
-from .core. model_wrapper import ModelWrapper, normalize_direction
+from .core.model_wrapper import ModelWrapper, normalize_direction
 from .core.region_traverser import LinearRegionTraverser, TraversalResult, BatchTraversalResult
-from .core. direction_finder import DecisionBoundaryDirectionFinder, find_decision_boundary_direction
-from . core.region_properties import (
+from .core.direction_finder import DecisionBoundaryDirectionFinder, find_decision_boundary_direction
+from .core.region_properties import (
     RegionPropertyAnalyzer,
     RegionProperties,
     AdjacentRegionDiff,
@@ -21,7 +21,7 @@ from . core.region_properties import (
 )
 from .core.analyzer import LinearRegionAnalyzer, AnalysisResult, BatchAnalysisResult
 
-__version__ = "0. 1.0"
+__version__ = "0.1.0"
 __all__ = [
     # 高层 API（推荐）
     "LinearRegionAnalyzer",

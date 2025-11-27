@@ -9,7 +9,7 @@ DecisionBoundaryDirectionFinder: 计算朝向决策边界的方向
 import torch
 import torch.nn as nn
 from typing import Tuple
-from . model_wrapper import normalize_direction
+from .model_wrapper import normalize_direction
 
 
 class DecisionBoundaryDirectionFinder:
@@ -27,7 +27,7 @@ class DecisionBoundaryDirectionFinder:
             model: PyTorch 模型
             device: 计算设备
         """
-        self. model = model
+        self.model = model
         self.device = device
         self.model.to(device)
         self.model.eval()
@@ -51,13 +51,13 @@ class DecisionBoundaryDirectionFinder:
             direction: 方向向量, shape 同 x
         """
         x = x.to(self.device)
-        x_grad = x.detach(). clone(). requires_grad_(True)
+        x_grad = x.detach().clone().requires_grad_(True)
         
         # 前向传播
-        logits = self. model(x_grad)  # (batch, num_classes)
+        logits = self.model(x_grad)  # (batch, num_classes)
         
         # 找到每个样本的 top1 和 top2
-        top2_values, top2_indices = torch. topk(logits, k=2, dim=1)
+        top2_values, top2_indices = torch.topk(logits, k=2, dim=1)
         top1_logit = top2_values[:, 0]  # (batch,)
         top2_logit = top2_values[:, 1]  # (batch,)
         
@@ -69,7 +69,7 @@ class DecisionBoundaryDirectionFinder:
         loss.backward()
         
         # 梯度就是方向
-        direction = x_grad. grad.detach(). clone()
+        direction = x_grad.grad.detach().clone()
         
         # 归一化
         if normalize:
@@ -108,19 +108,19 @@ class DecisionBoundaryDirectionFinder:
         loss = (top2_values[:, 1] - top2_values[:, 0]).sum()
         loss.backward()
         
-        direction = x_grad.grad. detach().clone()
+        direction = x_grad.grad.detach().clone()
         
         if normalize:
             direction = normalize_direction(direction)
         
-        return direction, top1_indices, top2_indices_out, margins. detach()
+        return direction, top1_indices, top2_indices_out, margins.detach()
     
     def find_direction_to_target_class(
         self, 
         x: torch.Tensor, 
         target_classes: torch.Tensor,
         normalize: bool = True
-    ) -> torch. Tensor:
+    ) -> torch.Tensor:
         """
         批量计算朝向指定目标类别决策边界的方向
         
@@ -133,24 +133,24 @@ class DecisionBoundaryDirectionFinder:
             direction: 方向向量
         """
         x = x.to(self.device)
-        batch_size = x. shape[0]
+        batch_size = x.shape[0]
         
         # 处理单个 target_class 的情况
         if isinstance(target_classes, int):
             target_classes = torch.full((batch_size,), target_classes, 
                                         dtype=torch.long, device=self.device)
         else:
-            target_classes = target_classes.to(self. device)
+            target_classes = target_classes.to(self.device)
         
-        x_grad = x. detach().clone(). requires_grad_(True)
+        x_grad = x.detach().clone(). requires_grad_(True)
         
-        logits = self. model(x_grad)
+        logits = self.model(x_grad)
         
         # 当前预测类别
         current_classes = logits.argmax(dim=1)
         
         # 获取当前类别和目标类别的 logit
-        batch_indices = torch. arange(batch_size, device=self.device)
+        batch_indices = torch.arange(batch_size, device=self.device)
         current_logits = logits[batch_indices, current_classes]
         target_logits = logits[batch_indices, target_classes]
         
@@ -158,7 +158,7 @@ class DecisionBoundaryDirectionFinder:
         loss = (target_logits - current_logits).sum()
         loss.backward()
         
-        direction = x_grad.grad. detach().clone()
+        direction = x_grad.grad.detach().clone()
         
         if normalize:
             direction = normalize_direction(direction)
@@ -170,7 +170,7 @@ class DecisionBoundaryDirectionFinder:
         x: torch.Tensor,
         labels: torch.Tensor,
         normalize: bool = True
-    ) -> torch. Tensor:
+    ) -> torch.Tensor:
         """
         计算对抗方向：使正确类别 logit 下降最快的方向
         
@@ -182,20 +182,20 @@ class DecisionBoundaryDirectionFinder:
         Returns:
             direction: 对抗方向
         """
-        x = x.to(self. device)
+        x = x.to(self.device)
         labels = labels.to(self.device)
-        x_grad = x. detach().clone(). requires_grad_(True)
+        x_grad = x.detach().clone(). requires_grad_(True)
         
-        logits = self. model(x_grad)
+        logits = self.model(x_grad)
         
-        batch_indices = torch. arange(x. shape[0], device=self.device)
+        batch_indices = torch.arange(x.shape[0], device=self.device)
         correct_logits = logits[batch_indices, labels]
         
         # 目标：最小化正确类别的 logit
-        loss = -correct_logits. sum()
+        loss = -correct_logits.sum()
         loss.backward()
         
-        direction = x_grad.grad. detach().clone()
+        direction = x_grad.grad.detach().clone()
         
         if normalize:
             direction = normalize_direction(direction)
@@ -207,7 +207,7 @@ def find_decision_boundary_direction(
     model: nn.Module, 
     x: torch.Tensor, 
     device: str = "cpu"
-) -> torch. Tensor:
+) -> torch.Tensor:
     """
     便捷函数：计算朝向决策边界的方向
     
@@ -220,4 +220,4 @@ def find_decision_boundary_direction(
         direction: 归一化的方向向量
     """
     finder = DecisionBoundaryDirectionFinder(model, device)
-    return finder. find_direction(x)
+    return finder.find_direction(x)
