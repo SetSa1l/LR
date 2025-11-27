@@ -1,6 +1,9 @@
 # 新的精简 API（推荐使用）
 from .linear_region_analyzer import SimpleLinearRegionAnalyzer, SimpleAnalysisResult
 
+# 极速版本 - 10-20x 性能提升
+from .fast_linear_region_analyzer import FastLinearRegionAnalyzer, FastAnalysisResult
+
 # 保留旧 API 以保持向后兼容
 from .model_wrapper import ModelWrapper, normalize_direction, ActivationPattern, RegionState
 from .region_traverser import LinearRegionTraverser, TraversalResult, BatchTraversalResult, LinearRegionInfo
@@ -17,6 +20,9 @@ __all__ = [
     # 新的精简 API（推荐）
     "SimpleLinearRegionAnalyzer",
     "SimpleAnalysisResult",
+    # 极速版本 - 10-20x 性能提升
+    "FastLinearRegionAnalyzer",
+    "FastAnalysisResult",
     # 旧 API（保持兼容）
     "ModelWrapper", 
     "normalize_direction",
