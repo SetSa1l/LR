@@ -158,7 +158,7 @@ class AffineLayerWrapper(nn.Module):
             output_shape = (self.batch_size, self.linear.weight.shape[0])
             bias_shape = (1, -1)
         else:
-            output_shape = (self.batch_size, self.linear.weight. shape[0], 1, 1)
+            output_shape = (self.batch_size, self.linear.weight.shape[0], 1, 1)
             bias_shape = (1, -1, 1, 1)
         
         bias_broadcast = torch.zeros(
@@ -174,7 +174,7 @@ class AffineLayerWrapper(nn.Module):
         mean = self.linear.running_mean
         var = self.linear.running_var
         eps = self.linear.eps
-        weight = self.linear. weight
+        weight = self.linear.weight
         
         output_shape = (self.batch_size, bias_orig.shape[0], 1, 1)
         bias_shape = (1, bias_orig.shape[0], 1, 1)
