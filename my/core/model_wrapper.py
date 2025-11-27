@@ -21,10 +21,10 @@ MAX_RETRY_STEP_MULTIPLIER = 100.0  # 重试时的最大步长倍数
 MAX_RETRIES = 10  # 最大重试次数，避免无限循环
 
 
-def normalize_direction(direction: torch.Tensor) -> torch. Tensor:
+def normalize_direction(direction: torch.Tensor) -> torch.Tensor:
     """归一化方向向量"""
     flat = direction.view(direction.shape[0], -1)
-    norm = torch. norm(flat, p=2, dim=1, keepdim=True)
+    norm = torch.norm(flat, p=2, dim=1, keepdim=True)
     norm = norm.view((direction.shape[0],) + (1,) * (len(direction.shape) - 1))
     return direction / (norm + 1e-8)
 
@@ -32,7 +32,7 @@ def normalize_direction(direction: torch.Tensor) -> torch. Tensor:
 @dataclass
 class ActivationPattern:
     """存储网络的激活模式"""
-    patterns: List[torch. Tensor] = field(default_factory=list)
+    patterns: List[torch.Tensor] = field(default_factory=list)
     
     def __eq__(self, other):
         if len(self.patterns) != len(other. patterns):

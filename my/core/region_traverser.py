@@ -365,13 +365,13 @@ class LinearRegionTraverser:
                     )
                     step = normal_lambda + adaptive_epsilon
                     
-                    current_x[normal_global] += step. view(-1, *([1] * (current_x.dim() - 1))) * directions[normal_global]
+                    current_x[normal_global] += step.view(-1, *([1] * (current_x.dim() - 1))) * directions[normal_global]
                     current_t[normal_global] += step
             
             # 更新上一步的激活模式
             if prev_pattern_tensors is None:
                 prev_pattern_tensors = [
-                    torch.zeros((batch_size,) + shape, dtype=torch. bool, device=self.device)
+                    torch.zeros((batch_size,) + shape, dtype=torch.bool, device=self.device)
                     for shape in pattern_shapes
                 ]
             
