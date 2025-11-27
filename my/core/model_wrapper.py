@@ -15,21 +15,20 @@ from copy import deepcopy
 EPSILON = 1e-6
 
 
-def normalize_direction(direction: torch. Tensor) -> torch.Tensor:
+def normalize_direction(direction: torch.Tensor) -> torch.Tensor:
     """归一化方向向量"""
     flat = direction.view(direction.shape[0], -1)
-    norm = torch.norm(flat, p=2, dim=1, keepdim=True)
     norm = torch.norm(flat, p=2, dim=1, keepdim=True)
     norm = norm.view((direction.shape[0],) + (1,) * (len(direction.shape) - 1))
     return direction / (norm + 1e-8)
 
 
 @torch.jit.script
-def compute_direction_norm(direction: torch. Tensor) -> torch.Tensor:
+def compute_direction_norm(direction: torch.Tensor) -> torch.Tensor:
     """计算方向向量的范数 - JIT 优化"""
     flat = direction.view(direction.shape[0], -1)
-    norm = torch. norm(flat, p=2, dim=1, keepdim=True)
-    shape = [direction.shape[0]] + [1] * (len(direction. shape) - 1)
+    norm = torch.norm(flat, p=2, dim=1, keepdim=True)
+    shape = [direction.shape[0]] + [1] * (len(direction.shape) - 1)
     return norm.view(shape)
 
 
@@ -39,8 +38,8 @@ def _compute_lambdas_jit(
     pre_act_dir: torch.Tensor,
     epsilon: torch.Tensor,
     inf: torch.Tensor,
-    machine_eps: torch. Tensor
-) -> torch. Tensor:
+    machine_eps: torch.Tensor
+) -> torch.Tensor:
     """JIT 编译的 lambda 计算 - 核心热点函数"""
     half_batch = pre_act_data.shape[0]
     
@@ -66,28 +65,27 @@ def _compute_lambdas_jit(
 class ActivationPattern:
     """存储网络的激活模式"""
     patterns: List[torch.Tensor] = field(default_factory=list)
-    patterns: List[torch.Tensor] = field(default_factory=list)
     
     def equals(self, other: "ActivationPattern") -> torch.Tensor:
         """批量比较激活模式是否相同"""
         if len(self.patterns) == 0:
             raise ValueError("Empty activation pattern")
         
-        batch_size = self. patterns[0].shape[0]
+        batch_size = self.patterns[0].shape[0]
         device = self.patterns[0].device
         same_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
         
         for p1, p2 in zip(self.patterns, other.patterns):
             p1_flat = p1.view(batch_size, -1)
             p2_flat = p2.view(batch_size, -1)
-            layer_same = (p1_flat == p2_flat). all(dim=1)
+            layer_same = (p1_flat == p2_flat).all(dim=1)
             same_mask = same_mask & layer_same
         
         return same_mask
     
-    def not_equal_indices(self, other: "ActivationPattern") -> torch. Tensor:
+    def not_equal_indices(self, other: "ActivationPattern") -> torch.Tensor:
         """返回激活模式不同的样本索引"""
-        same_mask = self. equals(other)
+        same_mask = self.equals(other)
         return torch.where(~same_mask)[0]
     
     def copy(self):
@@ -113,30 +111,30 @@ def is_affine_layer(module: nn.Module) -> bool:
     return isinstance(module, (nn.Linear, nn.Conv2d, nn.BatchNorm2d))
 
 
-class AffineLayerWrapper(nn. Module):
+class AffineLayerWrapper(nn.Module):
     """包装线性层，分离 bias 计算"""
     
-    def __init__(self, linear_module: nn. Module, batch_size: int):
+    def __init__(self, linear_module: nn.Module, batch_size: int):
         super().__init__()
         
         if not is_affine_layer(linear_module):
             raise ValueError("Unsupported module type: %s" % type(linear_module))
         
-        self. linear = linear_module
+        self.linear = linear_module
         self.half_batch = batch_size
         self.batch_size = batch_size * 2
         self._retain_bias = False
         self._enabled = True
         
         self.bias = None
-        self. bias_orig = None
+        self.bias_orig = None
         self._init_bias()
     
     def _init_bias(self):
-        if self. linear.bias is None:
+        if self.linear.bias is None:
             return
         
-        bias_orig = self.linear. bias.detach(). clone()
+        bias_orig = self.linear.bias.detach().clone()
         
         if isinstance(self.linear, nn.Linear):
             weight_dims = 0
@@ -155,12 +153,12 @@ class AffineLayerWrapper(nn. Module):
         
         self.linear.bias = None
     
-    def _create_bias_normal(self, bias_orig: torch. Tensor) -> nn.Parameter:
+    def _create_bias_normal(self, bias_orig: torch.Tensor) -> nn.Parameter:
         if isinstance(self.linear, nn.Linear):
             output_shape = (self.batch_size, self.linear.weight.shape[0])
             bias_shape = (1, -1)
         else:
-            output_shape = (self. batch_size, self.linear.weight. shape[0], 1, 1)
+            output_shape = (self.batch_size, self.linear.weight.shape[0], 1, 1)
             bias_shape = (1, -1, 1, 1)
         
         bias_broadcast = torch.zeros(
@@ -168,15 +166,15 @@ class AffineLayerWrapper(nn. Module):
             dtype=self.linear.weight.dtype,
             device=self.linear.weight.device
         )
-        bias_broadcast[:self.half_batch] = bias_orig. reshape(bias_shape)
+        bias_broadcast[:self.half_batch] = bias_orig.reshape(bias_shape)
         
-        return nn. Parameter(bias_broadcast, requires_grad=False)
+        return nn.Parameter(bias_broadcast, requires_grad=False)
     
     def _create_bias_bn(self, bias_orig: torch.Tensor) -> nn.Parameter:
         mean = self.linear.running_mean
-        var = self. linear.running_var
+        var = self.linear.running_var
         eps = self.linear.eps
-        weight = self.linear. weight
+        weight = self.linear.weight
         
         output_shape = (self.batch_size, bias_orig.shape[0], 1, 1)
         bias_shape = (1, bias_orig.shape[0], 1, 1)
@@ -184,7 +182,7 @@ class AffineLayerWrapper(nn. Module):
         bias_broadcast = torch.zeros(
             output_shape,
             dtype=weight.dtype,
-            device=weight. device
+            device=weight.device
         )
         
         bias_broadcast[:self.half_batch] = bias_orig.reshape(bias_shape)
@@ -194,21 +192,21 @@ class AffineLayerWrapper(nn. Module):
         return nn.Parameter(bias_broadcast, requires_grad=False)
     
     def retain_bias_(self, retain: bool = False):
-        self._retain_bias = retain and (self. bias_orig is not None)
+        self._retain_bias = retain and (self.bias_orig is not None)
     
     def set_enabled(self, enabled: bool):
         self._enabled = enabled
     
     @property
     def weight(self):
-        return self. linear.weight if self. linear is not None else None
+        return self.linear.weight if self.linear is not None else None
     
-    def forward(self, x: torch.Tensor) -> torch. Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.linear(x)
         
         if not self._enabled:
             if self.bias_orig is not None:
-                out = out + self. bias_orig
+                out = out + self.bias_orig
             return out
         
         if self._retain_bias and self.bias_orig is not None:
@@ -217,15 +215,15 @@ class AffineLayerWrapper(nn. Module):
             b = x.shape[0] // 2
             if b <= self.half_batch:
                 # 使用 narrow 避免拷贝
-                bias_first_half = self.bias. narrow(0, 0, b)
+                bias_first_half = self.bias.narrow(0, 0, b)
                 bias_second_half = self.bias.narrow(0, self.half_batch, b)
             else:
                 repeats = (b + self.half_batch - 1) // self.half_batch
-                ndim = len(self.bias. shape) - 1
-                bias_first_half = self. bias[:self.half_batch]. repeat(repeats, *([1] * ndim))[:b]
+                ndim = len(self.bias.shape) - 1
+                bias_first_half = self.bias[:self.half_batch].repeat(repeats, *([1] * ndim))[:b]
                 bias_second_half = self.bias[self.half_batch:self.batch_size].repeat(repeats, *([1] * ndim))[:b]
             
-            bias_to_use = torch. cat([bias_first_half, bias_second_half], dim=0)
+            bias_to_use = torch.cat([bias_first_half, bias_second_half], dim=0)
             out = out + bias_to_use
         
         return out
@@ -251,7 +249,7 @@ class ModelWrapper:
     def __init__(
         self, 
         model: nn.Module, 
-        input_shape: Tuple[int, ... ],
+        input_shape: Tuple[int, ...],
         batch_size: int = 128,
         device: str = "cpu"
     ):
@@ -264,7 +262,7 @@ class ModelWrapper:
         self._model.requires_grad_(False)
         self._model.to(device)
         
-        self._model_dtype = next(self._model. parameters()).dtype
+        self._model_dtype = next(self._model.parameters()).dtype
         
         wrap_affine_layers(self._model, 'model', batch_size, None)
         
@@ -328,7 +326,7 @@ class ModelWrapper:
         self._num_relus = len(self._relu_modules)
     
     def _find_affine_wrappers(self):
-        for module in self._model. modules():
+        for module in self._model.modules():
             if isinstance(module, AffineLayerWrapper):
                 self._affine_wrappers.append(module)
     
@@ -357,7 +355,7 @@ class ModelWrapper:
         
         for module in self._affine_wrappers:
             pre_handle = module.register_forward_pre_hook(self._affine_pre_hook)
-            post_handle = module. register_forward_hook(self._affine_post_hook)
+            post_handle = module.register_forward_hook(self._affine_post_hook)
             self._model_handles.extend([pre_handle, post_handle])
     
     def _remove_hooks(self):
@@ -372,14 +370,14 @@ class ModelWrapper:
         return inputs
     
     def _affine_post_hook(self, module, inputs, output):
-        module. retain_bias_(False)
+        module.retain_bias_(False)
         return output
     
     def _relu_hook(self, module, inputs, output):
         if not self._hooks_active:
             return output
         
-        relu_idx = module.index. item()
+        relu_idx = module.index.item()
         pre_act = inputs[0]
         
         half_batch = pre_act.shape[0] // 2
@@ -387,12 +385,12 @@ class ModelWrapper:
             return output
         
         # 使用 narrow 避免拷贝
-        pre_act_data = pre_act. narrow(0, 0, half_batch)
+        pre_act_data = pre_act.narrow(0, 0, half_batch)
         pre_act_dir = pre_act.narrow(0, half_batch, half_batch)
         
-        # 激活模式
+        # 激活模式 - 直接使用，不需要 clone（后续不修改）
         act_pattern = pre_act_data > 0
-        self._patterns_buffer. append(act_pattern. clone())
+        self._patterns_buffer.append(act_pattern)
         
         # 使用 JIT 编译的 lambda 计算
         with torch.no_grad():
@@ -402,15 +400,14 @@ class ModelWrapper:
             )
             self._lambdas_to_cross[:, relu_idx] = min_lambda
         
-        # 修改方向部分的输出：应用当前激活模式
-        modified_output = output. clone()
-        modified_output[half_batch:] = pre_act_dir * act_pattern. to(pre_act_dir. dtype)
+        # 使用 in-place 操作修改方向部分的输出
+        output[half_batch:] = pre_act_dir * act_pattern.to(pre_act_dir.dtype)
         
-        return modified_output
+        return output
     
     def _forward(self, x: torch.Tensor, retain_bias: bool = False):
         self._retain_bias = retain_bias
-        batch_size = x. shape[0] // 2
+        batch_size = x.shape[0] // 2
         self._reset_state(batch_size)
         self._hooks_active = True
         
@@ -437,7 +434,7 @@ class ModelWrapper:
         self._attach_hooks()
         self._set_affine_wrappers_enabled(True)
         
-        x = x.to(device=self. device, dtype=self._model_dtype)
+        x = x.to(device=self.device, dtype=self._model_dtype)
         direction = direction.to(device=self.device, dtype=self._model_dtype)
         
         combined = torch.cat([x, direction], dim=0)
@@ -448,11 +445,11 @@ class ModelWrapper:
         lambda_to_boundary, boundary_layer_idx = self._lambdas_to_cross.min(dim=1)
         
         return RegionState(
-            activation_pattern=ActivationPattern(patterns=[p. clone() for p in self._patterns_buffer]),
+            activation_pattern=ActivationPattern(patterns=[p.clone() for p in self._patterns_buffer]),
             lambdas_per_layer=self._lambdas_to_cross.clone(),
             lambda_to_boundary=lambda_to_boundary,
             boundary_layer_idx=boundary_layer_idx,
-            logits=logits. clone()
+            logits=logits.clone()
         )
     
     def get_activation_pattern_only(self, x: torch.Tensor) -> ActivationPattern:
@@ -460,7 +457,7 @@ class ModelWrapper:
         self._attach_hooks()
         self._set_affine_wrappers_enabled(True)
         
-        x = x. to(device=self.device, dtype=self._model_dtype)
+        x = x.to(device=self.device, dtype=self._model_dtype)
         
         zero_dir = torch.zeros_like(x)
         combined = torch.cat([x, zero_dir], dim=0)
