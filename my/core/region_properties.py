@@ -434,7 +434,7 @@ class RegionPropertyAnalyzer:
             max_jacobian_norm=max(fro_list) if fro_list else 0.0,
             mean_jacobian_diff=sum(jac_diff_list) / len(jac_diff_list) if jac_diff_list else 0.0,
             max_jacobian_diff=max(jac_diff_list) if jac_diff_list else 0.0,
-            mean_loss_diff=sum(abs(d) for d in loss_diff_list) / len(loss_diff_list) if loss_diff_list else 0.0,
+            mean_loss_diff=sum(d for d in loss_diff_list) / len(loss_diff_list) if loss_diff_list else 0.0,
             total_loss_change=sum(loss_diff_list) if loss_diff_list else 0.0
         )
     

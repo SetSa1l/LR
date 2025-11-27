@@ -7,7 +7,7 @@ import torch
 import sys
 import os
 import numpy as np
-from collections import defaultdict
+import time
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path. abspath(__file__)))
@@ -182,6 +182,9 @@ def analyze_full_testset(analyzer, data_loader, test_dataset, max_distance=10.0,
     """对整个测试集进行详细分析"""
     device = analyzer.device
     
+    # 记录开始时间
+    start_time = time.time()
+    
     all_results = []
     all_labels = []
     samples_analyzed = 0
@@ -233,204 +236,73 @@ def analyze_full_testset(analyzer, data_loader, test_dataset, max_distance=10.0,
     final_correct = (final_classes == all_labels)
     initial_accuracy = initial_correct.mean()
     final_accuracy = final_correct.mean()
+    crossing_rate = crossed_boundary.mean()
     
-    # 按类别统计
-    class_stats = defaultdict(lambda: {
-        'count': 0,
-        'num_regions': [],
-        'mean_jacobian_norm': [],
-        'crossed_boundary': [],
-        'initial_correct': [],
-        'final_correct': []
-    })
+    # 记录结束时间
+    end_time = time.time()
+    elapsed_time = end_time - start_time
     
-    for i, label in enumerate(all_labels):
-        stats = class_stats[int(label)]
-        stats['count'] += 1
-        stats['num_regions'].append(all_results[i].num_regions)
-        stats['mean_jacobian_norm'].append(all_results[i].mean_jacobian_norm)
-        stats['crossed_boundary'].append(all_results[i].crossed_decision_boundary)
-        stats['initial_correct'].append(predicted_classes[i] == label)
-        stats['final_correct'].append(final_classes[i] == label)
-    
-    # 打印详细统计报告
+    # 打印统计报告（只包含均值和标准差）
     print("\n" + "=" * 80)
     print("全测试集分析结果汇总")
     print("=" * 80)
     
-    # 1. 基本信息
-    print("\n【基本信息】")
+    print("\n【统计信息】")
     print("-" * 80)
     print("总样本数: %d" % len(all_results))
-    print("初始预测准确率: %.4f%% (%d/%d)" % (
-        100 * initial_accuracy, initial_correct.sum(), len(all_results)))
-    print("终点预测准确率: %.4f%% (%d/%d)" % (
-        100 * final_accuracy, final_correct.sum(), len(all_results)))
-    print("准确率变化: %.4f%%" % (100 * (final_accuracy - initial_accuracy)))
+    print("初始预测准确率: %.4f%%" % (100 * initial_accuracy))
+    print("终点预测准确率: %.4f%%" % (100 * final_accuracy))
+    print("跨越决策边界比例: %.4f%%" % (100 * crossing_rate))
     
-    # 2. 决策边界跨越统计
-    print("\n【决策边界跨越统计】")
+    print("\n【区域数】")
     print("-" * 80)
-    num_crossed = crossed_boundary.sum()
-    crossing_rate = crossed_boundary.mean()
-    print("跨越决策边界的样本数: %d (%.4f%%)" % (num_crossed, 100 * crossing_rate))
-    print("未跨越决策边界的样本数: %d (%.4f%%)" % (
-        len(all_results) - num_crossed, 100 * (1 - crossing_rate)))
+    print("均值: %.4f" % num_regions.mean())
+    print("标准差: %.4f" % num_regions.std())
     
-    # 跨越边界 vs 未跨越边界的统计对比
-    crossed_mask = crossed_boundary
-    not_crossed_mask = ~crossed_boundary
-    
-    if crossed_mask.sum() > 0:
-        print("\n跨越边界的样本统计:")
-        print("  平均区域数: %.2f (未跨越: %.2f)" % (
-            num_regions[crossed_mask].mean(),
-            num_regions[not_crossed_mask].mean() if not_crossed_mask.sum() > 0 else 0))
-        print("  平均雅可比范数: %.4f (未跨越: %.4f)" % (
-            mean_jacobian_norms[crossed_mask].mean(),
-            mean_jacobian_norms[not_crossed_mask].mean() if not_crossed_mask.sum() > 0 else 0))
-        print("  平均损失变化: %.4f (未跨越: %.4f)" % (
-            total_loss_changes[crossed_mask].mean(),
-            total_loss_changes[not_crossed_mask].mean() if not_crossed_mask.sum() > 0 else 0))
-    
-    # 3. 区域数统计
-    print("\n【区域数统计】")
-    print("-" * 80)
-    print("均值: %.2f" % num_regions.mean())
-    print("中位数: %.2f" % np.median(num_regions))
-    print("标准差: %.2f" % num_regions.std())
-    print("最小值: %d" % num_regions.min())
-    print("最大值: %d" % num_regions.max())
-    print("25%%分位数: %.2f" % np.percentile(num_regions, 25))
-    print("75%%分位数: %.2f" % np.percentile(num_regions, 75))
-    print("90%%分位数: %.2f" % np.percentile(num_regions, 90))
-    print("95%%分位数: %.2f" % np.percentile(num_regions, 95))
-    print("99%%分位数: %.2f" % np.percentile(num_regions, 99))
-    
-    # 4. 遍历距离统计
-    print("\n【遍历距离统计】")
+    print("\n【遍历距离】")
     print("-" * 80)
     print("均值: %.4f" % total_distances.mean())
-    print("中位数: %.4f" % np.median(total_distances))
     print("标准差: %.4f" % total_distances.std())
-    print("最小值: %.4f" % total_distances.min())
-    print("最大值: %.4f" % total_distances.max())
     
-    # 5. 雅可比范数统计
-    print("\n【雅可比范数统计】")
+    print("\n【平均雅可比范数】")
     print("-" * 80)
-    print("平均雅可比范数:")
-    print("  均值: %.4f" % mean_jacobian_norms.mean())
-    print("  中位数: %.4f" % np.median(mean_jacobian_norms))
-    print("  标准差: %.4f" % mean_jacobian_norms.std())
-    print("  最小值: %.4f" % mean_jacobian_norms.min())
-    print("  最大值: %.4f" % mean_jacobian_norms.max())
+    print("均值: %.4f" % mean_jacobian_norms.mean())
+    print("标准差: %.4f" % mean_jacobian_norms.std())
     
-    print("\n最大雅可比范数:")
-    print("  均值: %.4f" % max_jacobian_norms.mean())
-    print("  中位数: %.4f" % np.median(max_jacobian_norms))
-    print("  标准差: %.4f" % max_jacobian_norms.std())
-    print("  最大值: %.4f" % max_jacobian_norms.max())
-    
-    # 6. 边界处雅可比变化统计
-    print("\n【边界处雅可比变化统计】")
+    print("\n【最大雅可比范数】")
     print("-" * 80)
-    print("平均变化:")
-    print("  均值: %.4f" % mean_jacobian_diffs.mean())
-    print("  中位数: %.4f" % np.median(mean_jacobian_diffs))
-    print("  标准差: %.4f" % mean_jacobian_diffs.std())
-    print("  最大值: %.4f" % mean_jacobian_diffs.max())
+    print("均值: %.4f" % max_jacobian_norms.mean())
+    print("标准差: %.4f" % max_jacobian_norms.std())
     
-    print("\n最大变化:")
-    print("  均值: %.4f" % max_jacobian_diffs.mean())
-    print("  中位数: %.4f" % np.median(max_jacobian_diffs))
-    print("  标准差: %.4f" % max_jacobian_diffs.std())
-    print("  最大值: %.4f" % max_jacobian_diffs.max())
-    
-    # 7. 损失变化统计
-    print("\n【损失变化统计】")
+    print("\n【边界处平均雅可比变化】")
     print("-" * 80)
-    print("边界处平均损失变化:")
-    print("  均值: %.4f" % mean_loss_diffs.mean())
-    print("  中位数: %.4f" % np.median(mean_loss_diffs))
-    print("  标准差: %.4f" % mean_loss_diffs.std())
-    print("  最小值: %.4f" % mean_loss_diffs.min())
-    print("  最大值: %.4f" % mean_loss_diffs.max())
+    print("均值: %.4f" % mean_jacobian_diffs.mean())
+    print("标准差: %.4f" % mean_jacobian_diffs.std())
     
-    print("\n总损失变化 (起点到终点):")
-    print("  均值: %.4f" % total_loss_changes.mean())
-    print("  中位数: %.4f" % np.median(total_loss_changes))
-    print("  标准差: %.4f" % total_loss_changes.std())
-    print("  最小值: %.4f" % total_loss_changes.min())
-    print("  最大值: %.4f" % total_loss_changes.max())
+    print("\n【边界处最大雅可比变化】")
+    print("-" * 80)
+    print("均值: %.4f" % max_jacobian_diffs.mean())
+    print("标准差: %.4f" % max_jacobian_diffs.std())
     
-    # 8. Margin 统计
-    print("\n【Margin 统计 (top1 - top2 logit 差)】")
+    print("\n【边界处平均损失变化】")
+    print("-" * 80)
+    print("均值: %.4f" % mean_loss_diffs.mean())
+    print("标准差: %.4f" % mean_loss_diffs.std())
+    
+    print("\n【总损失变化 (起点到终点)】")
+    print("-" * 80)
+    print("均值: %.4f" % total_loss_changes.mean())
+    print("标准差: %.4f" % total_loss_changes.std())
+    
+    print("\n【Margin (top1 - top2 logit 差)】")
     print("-" * 80)
     print("均值: %.4f" % margins.mean())
-    print("中位数: %.4f" % np.median(margins))
     print("标准差: %.4f" % margins.std())
-    print("最小值: %.4f" % margins.min())
-    print("最大值: %.4f" % margins.max())
     
-    # 9. 按类别统计
-    print("\n【按类别统计】")
+    print("\n【运行时间】")
     print("-" * 80)
-    cifar10_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 
-                       'dog', 'frog', 'horse', 'ship', 'truck']
-    
-    for class_idx in sorted(class_stats.keys()):
-        stats = class_stats[class_idx]
-        class_name = cifar10_classes[class_idx] if class_idx < len(cifar10_classes) else str(class_idx)
-        
-        regions_arr = np.array(stats['num_regions'])
-        jacobian_arr = np.array(stats['mean_jacobian_norm'])
-        crossed_arr = np.array(stats['crossed_boundary'])
-        init_correct_arr = np.array(stats['initial_correct'])
-        final_correct_arr = np.array(stats['final_correct'])
-        
-        print("\n类别 %d (%s):" % (class_idx, class_name))
-        print("  样本数: %d" % stats['count'])
-        print("  初始准确率: %.2f%% (%d/%d)" % (
-            100 * init_correct_arr.mean(), init_correct_arr.sum(), stats['count']))
-        print("  终点准确率: %.2f%% (%d/%d)" % (
-            100 * final_correct_arr.mean(), final_correct_arr.sum(), stats['count']))
-        print("  跨越边界比例: %.2f%% (%d/%d)" % (
-            100 * crossed_arr.mean(), crossed_arr.sum(), stats['count']))
-        print("  平均区域数: %.2f" % regions_arr.mean())
-        print("  平均雅可比范数: %.4f" % jacobian_arr.mean())
-    
-    # 10. 预测正确 vs 错误的样本对比
-    print("\n【预测正确 vs 错误样本对比】")
-    print("-" * 80)
-    
-    correct_mask = initial_correct
-    wrong_mask = ~initial_correct
-    
-    if wrong_mask.sum() > 0:
-        print("初始预测正确的样本 (%d 个):" % correct_mask.sum())
-        print("  平均区域数: %.2f" % num_regions[correct_mask].mean())
-        print("  平均雅可比范数: %.4f" % mean_jacobian_norms[correct_mask].mean())
-        print("  跨越边界比例: %.2f%%" % (100 * crossed_boundary[correct_mask].mean()))
-        print("  平均 Margin: %.4f" % margins[correct_mask].mean())
-        
-        print("\n初始预测错误的样本 (%d 个):" % wrong_mask.sum())
-        print("  平均区域数: %.2f" % num_regions[wrong_mask].mean())
-        print("  平均雅可比范数: %.4f" % mean_jacobian_norms[wrong_mask].mean())
-        print("  跨越边界比例: %.2f%%" % (100 * crossed_boundary[wrong_mask].mean()))
-        print("  平均 Margin: %.4f" % margins[wrong_mask].mean())
-    
-    # 11. 区域数分布区间统计
-    print("\n【区域数分布区间统计】")
-    print("-" * 80)
-    bins = [0, 1, 5, 10, 20, 50, 100, 200, 500, float('inf')]
-    bin_labels = ['0', '1', '2-5', '6-10', '11-20', '21-50', '51-100', '101-200', '201-500', '500+']
-    
-    hist, _ = np.histogram(num_regions, bins=bins)
-    for i, (label, count) in enumerate(zip(bin_labels, hist)):
-        if count > 0:
-            print("  %s 个区域: %d 样本 (%.2f%%)" % (
-                label, count, 100 * count / len(all_results)))
+    print("总运行时间: %.2f 秒" % elapsed_time)
+    print("平均每个样本: %.4f 秒" % (elapsed_time / len(all_results)))
     
     print("\n" + "=" * 80)
     print("全测试集分析完成！")
@@ -496,8 +368,8 @@ def main():
     
     full_testset_results = analyze_full_testset(
         analyzer, test_loader, test_dataset,
-        max_distance=10.0,
-        max_regions=50
+        max_distance=1.0,
+        max_regions=2000
     )
     
     # ============ 清理 ============
