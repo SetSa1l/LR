@@ -19,9 +19,26 @@ from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass
 from copy import deepcopy
 
+# Try to import torch.func (PyTorch >= 2.0)
+_TORCH_FUNC_AVAILABLE = False
+try:
+    from torch.func import jacrev, vmap, functional_call
+    _TORCH_FUNC_AVAILABLE = True
+except ImportError:
+    jacrev = vmap = functional_call = None
+
 EPSILON = 1e-6
 BOUNDARY_EPS_MIN = 1e-5
 BOUNDARY_EPS_RATIO = 0.1
+
+
+def _stable_divide(numerator: torch.Tensor, denominator: torch.Tensor, 
+                   machine_eps: torch.Tensor) -> torch.Tensor:
+    """Numerically stable division avoiding division by zero."""
+    sign = denominator.sign()
+    zero_mask = (denominator == 0).to(denominator.dtype)
+    safe_denom = denominator + machine_eps.to(denominator.dtype) * (sign + zero_mask)
+    return numerator / safe_denom
 
 
 @dataclass
@@ -103,11 +120,7 @@ class LightweightModelWrapper:
         self._patterns_buffer.append(act_pattern)
         
         with torch.no_grad():
-            sign_dir = pre_act_dir.sign()
-            zero_mask = (pre_act_dir == 0).to(pre_act_dir.dtype)
-            denom = pre_act_dir + self._machine_eps.to(pre_act_dir.dtype) * (sign_dir + zero_mask)
-            
-            lambdas = -pre_act_data / denom
+            lambdas = _stable_divide(-pre_act_data, pre_act_dir, self._machine_eps)
             lambdas = lambdas.view(half_batch, -1)
             lambdas = torch.where(lambdas > self._epsilon.to(lambdas.dtype), lambdas, self._inf.to(lambdas.dtype))
             min_lambda_layer = lambdas.min(dim=1)[0].double()
@@ -165,7 +178,7 @@ class FastLinearRegionAnalyzer:
         self._model.requires_grad_(False)
         self._model.to(device)
         self._model_dtype = next(self._model.parameters()).dtype
-        self._use_torch_func = hasattr(torch, 'func')
+        self._use_torch_func = _TORCH_FUNC_AVAILABLE
     
     def _to_device(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(device=self.device, dtype=self._model_dtype)
@@ -187,7 +200,6 @@ class FastLinearRegionAnalyzer:
     
     def _compute_gradient_norm_torch_func(self, points: torch.Tensor) -> torch.Tensor:
         """Compute gradient norms using torch.func.jacrev + vmap."""
-        from torch.func import jacrev, vmap, functional_call
         batch_size = points.shape[0]
         params = dict(self._model.named_parameters())
         buffers = dict(self._model.named_buffers())
@@ -335,8 +347,9 @@ class FastLinearRegionAnalyzer:
         # Phase 3: Batch compute losses
         before_losses = after_losses = torch.tensor([])
         if labels is not None and all_before:
-            bound_labels = torch.tensor([labels[i].item() for i, m in enumerate(mappings) 
-                                        for _ in range(m['num_bounds'])], dtype=torch.long, device=self.device)
+            # Build boundary labels using repeat_interleave for efficiency
+            num_bounds_per_sample = torch.tensor([m['num_bounds'] for m in mappings], device=self.device)
+            bound_labels = labels.repeat_interleave(num_bounds_per_sample)
             if len(bound_labels) > 0:
                 before_losses = self._compute_loss_batch(before_t, bound_labels)
                 after_losses = self._compute_loss_batch(after_t, bound_labels)
