@@ -11,14 +11,20 @@ from typing import List, Tuple, Optional
 from dataclasses import dataclass, field
 from copy import deepcopy
 
-EPSILON = 1e-6
-CROSSING_EPSILON = 1e-5
+# 基础数值常量（参考 Gamba 方法）
+EPSILON = 1e-6  # 用于判断 lambda 是否有效的阈值
+CROSSING_EPSILON = 1e-5  # 跨越边界时的基础步长增量
+
+# 动态步长常量（结合 Gamba 方法优化）
+MIN_STEP_SIZE = 1e-4  # 最小步长，避免因 lambda 过小导致停滞
+MAX_RETRY_STEP_MULTIPLIER = 100.0  # 重试时的最大步长倍数
+MAX_RETRIES = 10  # 最大重试次数，避免无限循环
 
 
-def normalize_direction(direction: torch.Tensor) -> torch. Tensor:
+def normalize_direction(direction: torch.Tensor) -> torch.Tensor:
     """归一化方向向量"""
     flat = direction.view(direction.shape[0], -1)
-    norm = torch. norm(flat, p=2, dim=1, keepdim=True)
+    norm = torch.norm(flat, p=2, dim=1, keepdim=True)
     norm = norm.view((direction.shape[0],) + (1,) * (len(direction.shape) - 1))
     return direction / (norm + 1e-8)
 
@@ -26,7 +32,7 @@ def normalize_direction(direction: torch.Tensor) -> torch. Tensor:
 @dataclass
 class ActivationPattern:
     """存储网络的激活模式"""
-    patterns: List[torch. Tensor] = field(default_factory=list)
+    patterns: List[torch.Tensor] = field(default_factory=list)
     
     def __eq__(self, other):
         if len(self.patterns) != len(other. patterns):

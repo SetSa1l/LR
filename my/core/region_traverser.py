@@ -9,7 +9,10 @@ import numpy as np
 from typing import List
 from dataclasses import dataclass, field
 
-from .model_wrapper import ModelWrapper, ActivationPattern, normalize_direction, EPSILON, CROSSING_EPSILON
+from .model_wrapper import (
+    ModelWrapper, ActivationPattern, normalize_direction, 
+    EPSILON, CROSSING_EPSILON, MIN_STEP_SIZE, MAX_RETRY_STEP_MULTIPLIER, MAX_RETRIES
+)
 
 
 @dataclass
@@ -183,6 +186,9 @@ class LinearRegionTraverser:
         # 上一步的激活模式
         prev_pattern_tensors = None
         
+        # 重试计数器（用于指数退避）
+        retry_counts = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+        
         iteration = 0
         while active_mask.any() and iteration < max_regions:
             iteration += 1
@@ -210,11 +216,35 @@ class LinearRegionTraverser:
                 )
                 
                 if same_mask.any():
-                    # 对模式相同的样本增大步长
+                    # 对模式相同的样本使用指数退避增大步长
                     retry_local_indices = torch.where(same_mask)[0]
                     retry_global_indices = active_indices[retry_local_indices]
-                    current_x[retry_global_indices] += CROSSING_EPSILON * 10 * directions[retry_global_indices]
-                    current_t[retry_global_indices] += CROSSING_EPSILON * 10
+                    
+                    # 检查是否超过最大重试次数
+                    exceeded_retries = retry_counts[retry_global_indices] >= MAX_RETRIES
+                    if exceeded_retries.any():
+                        # 超过最大重试次数的样本标记为不活跃
+                        exceeded_global = retry_global_indices[exceeded_retries]
+                        active_mask[exceeded_global] = False
+                    
+                    # 对未超过重试次数的样本进行重试
+                    retry_mask = ~exceeded_retries
+                    if retry_mask.any():
+                        retry_global = retry_global_indices[retry_mask]
+                        
+                        # 指数退避：step = MIN_STEP_SIZE * 2^retry_count，限制最大倍数
+                        retry_multipliers = torch.pow(
+                            2.0, 
+                            retry_counts[retry_global].float()
+                        ).clamp(max=MAX_RETRY_STEP_MULTIPLIER)
+                        retry_step = MIN_STEP_SIZE * retry_multipliers
+                        
+                        # 更新位置和时间
+                        current_x[retry_global] += retry_step.view(-1, *([1] * (current_x.dim() - 1))) * directions[retry_global]
+                        current_t[retry_global] += retry_step
+                        
+                        # 增加重试计数
+                        retry_counts[retry_global] += 1
                     
                     if same_mask.all():
                         continue
@@ -232,6 +262,9 @@ class LinearRegionTraverser:
             
             if n_active == 0:
                 continue
+            
+            # 模式已变化，重置重试计数器
+            retry_counts[active_indices] = 0
             
             active_t = current_t[active_indices]
             active_region_count = region_count[active_indices]
@@ -321,14 +354,24 @@ class LinearRegionTraverser:
                     exit_ts[normal_global, normal_write] = normal_exit_t
                     region_count[normal_global] += 1
                     
-                    step = normal_lambda + CROSSING_EPSILON
-                    current_x[normal_global] += step. view(-1, *([1] * (current_x.dim() - 1))) * directions[normal_global]
+                    # 动态步长（参考 Gamba 方法）：
+                    # 1. 对于正常的 lambda，使用 lambda + CROSSING_EPSILON
+                    # 2. 对于过小的 lambda（可能数值不稳定），使用 MIN_STEP_SIZE
+                    # 3. 自适应 epsilon：当 lambda 很小时，使用更大的跨越步长
+                    adaptive_epsilon = torch.where(
+                        normal_lambda < MIN_STEP_SIZE,
+                        MIN_STEP_SIZE,  # lambda 太小时使用 MIN_STEP_SIZE 作为跨越步长
+                        CROSSING_EPSILON * torch.ones_like(normal_lambda)  # 正常情况使用 CROSSING_EPSILON
+                    )
+                    step = normal_lambda + adaptive_epsilon
+                    
+                    current_x[normal_global] += step.view(-1, *([1] * (current_x.dim() - 1))) * directions[normal_global]
                     current_t[normal_global] += step
             
             # 更新上一步的激活模式
             if prev_pattern_tensors is None:
                 prev_pattern_tensors = [
-                    torch.zeros((batch_size,) + shape, dtype=torch. bool, device=self.device)
+                    torch.zeros((batch_size,) + shape, dtype=torch.bool, device=self.device)
                     for shape in pattern_shapes
                 ]
             
